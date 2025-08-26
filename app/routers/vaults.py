@@ -401,8 +401,8 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     }
     _write_json_key(_share_key(token), rec)
 
-    origin = request.headers.get('origin') or ''
-    link = (origin.rstrip('/') + f"/#share?token={token}") if origin else f"/#share?token={token}"
+    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    link = f"{front}/#share?token={token}"
 
     subject = "You have access to a photo vault"
     html = render_email(

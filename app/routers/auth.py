@@ -58,8 +58,8 @@ async def auth_password_reset(request: Request, payload: dict = Body(...)):
         write_json_key(_pw_reset_key(token), rec)
 
         # Build link to frontend handler
-        origin = request.headers.get("origin") or ""
-        link = (origin.rstrip("/") + f"/#newpassword?token={token}") if origin else f"/#newpassword?token={token}"
+        front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "").rstrip("/") or "https://photomark.cloud"
+        link = f"{front}/#newpassword?token={token}"
 
         subject = "Reset your password"
         html = render_email(
@@ -214,10 +214,8 @@ async def auth_email_verification_send(request: Request):
         }
         write_json_key(_email_verification_key(token), rec)
 
-        scheme = request.url.scheme or "https"
-        host = request.headers.get("host") or ""
-        base = f"{scheme}://{host}".rstrip("/") if host else ""
-        link = f"{base}/api/auth/email/verification/confirm?token={token}" if base else f"/api/auth/email/verification/confirm?token={token}"
+        base = os.getenv("PUBLIC_URL", "https://api.photomark.cloud").rstrip("/")
+        link = f"{base}/api/auth/email/verification/confirm?token={token}"
 
         subject = "Verify your email"
         html = render_email(
@@ -277,8 +275,8 @@ async def auth_email_verification_confirm(token: str, request: Request):
     except Exception as ex:
         logger.warning(f"Custom token creation failed: {ex}")
 
-    fe = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "").rstrip("/")
-    if fe and custom_jwt:
+    fe = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    if custom_jwt:
         return RedirectResponse(url=f"{fe}/#verify-success?ct={custom_jwt}", status_code=302)
 
     # Fallback success page

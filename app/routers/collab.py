@@ -84,10 +84,8 @@ async def invite_member(
         logger.warning("Failed to write invite index for token")
 
     # Build acceptance link (handled by frontend collaboration page)
-    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "").rstrip("/")
-    if not front:
-        front = os.getenv("PUBLIC_URL", "").rstrip("/") or ""
-    accept_url = f"{front}#collaboration?accept_token={token}" if front else f"/#{'collaboration'}?accept_token={token}"
+    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    accept_url = f"{front}#collaboration?accept_token={token}"
 
     html = render_email(
         "email_basic.html",
