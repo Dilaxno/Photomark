@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DMCA Takedown Notice - {{ violation_id }}</title>
+    <style>
+      .container { max-width: 700px; margin: 0 auto; font-family: Arial, sans-serif; }
+      .header { background: #dc2626; color: white; padding: 20px; text-align: center; }
+      .content { background: #f9f9f9; padding: 30px; }
+      .section { margin-bottom: 25px; }
+      .section h3 { color: #dc2626; margin-bottom: 10px; border-bottom: 2px solid #dc2626; padding-bottom: 5px; }
+      .info-box { background: white; padding: 15px; border-left: 4px solid #dc2626; margin: 10px 0; }
+      .footer { background: #374151; color: white; padding: 20px; text-align: center; font-size: 12px; }
+      .urgent { background: #fef2f2; border: 1px solid #fecaca; padding: 15px; border-radius: 5px; margin: 15px 0; }
+      .legal-text { font-size: 11px; color: #6b7280; line-height: 1.4; }
+    </style>
+  </head>
+  <body style="margin:0;padding:0;background:#f3f4f6;">
+    <div class="container">
+      <!-- Header -->
+      <div class="header">
+        <h1 style="margin:0;font-size:24px;">⚠️ DMCA TAKEDOWN NOTICE</h1>
+        <p style="margin:10px 0 0 0;font-size:14px;">Copyright Infringement - Immediate Action Required</p>
+      </div>
+      
+      <!-- Main Content -->
+      <div class="content">
+        <div class="urgent">
+          <strong>🚨 URGENT:</strong> This is a formal DMCA takedown notice regarding unauthorized use of copyrighted material on your website. Immediate action is required to avoid legal consequences.
+        </div>
+        
+        <!-- Copyright Owner Information -->
+        <div class="section">
+          <h3>📋 COPYRIGHT OWNER INFORMATION</h3>
+          <div class="info-box">
+            <strong>Name:</strong> {{ owner_name }}<br>
+            <strong>Email:</strong> {{ owner_email }}<br>
+            {% if owner_address %}<strong>Address:</strong> {{ owner_address }}<br>{% endif %}
+            {% if owner_phone %}<strong>Phone:</strong> {{ owner_phone }}<br>{% endif %}
+            {% if owner_company %}<strong>Company:</strong> {{ owner_company }}<br>{% endif %}
+          </div>
+        </div>
+        
+        <!-- Original Work -->
+        <div class="section">
+          <h3>🎨 ORIGINAL COPYRIGHTED WORK</h3>
+          <div class="info-box">
+            <strong>Original Work URL:</strong> <a href="{{ original_work_url }}" target="_blank">{{ original_work_url }}</a><br>
+            <strong>Copyright Status:</strong> Protected under U.S. and International Copyright Law<br>
+            <strong>Watermark:</strong> Contains visible/invisible watermark identifying ownership
+          </div>
+        </div>
+        
+        <!-- Infringing Material -->
+        <div class="section">
+          <h3>🚫 INFRINGING MATERIAL IDENTIFIED</h3>
+          <div class="info-box">
+            <strong>Infringing URL:</strong> <a href="{{ infringing_url }}" target="_blank">{{ infringing_url }}</a><br>
+            <strong>Page Title:</strong> {{ site_title }}<br>
+            <strong>Domain:</strong> {{ infringing_domain }}<br>
+            <strong>Violation ID:</strong> {{ violation_id }}<br>
+            <strong>Detection Date:</strong> {{ date }}<br>
+            {% if similarity_score %}<strong>Similarity Score:</strong> {{ similarity_score }}%<br>{% endif %}
+          </div>
+        </div>
+        
+        <!-- Legal Statements -->
+        <div class="section">
+          <h3>⚖️ LEGAL STATEMENTS</h3>
+          <div class="info-box">
+            <p><strong>Good Faith Belief:</strong> I have a good faith belief that the use of the copyrighted material described above is not authorized by the copyright owner, its agent, or the law.</p>
+            
+            <p><strong>Statement of Accuracy:</strong> I swear, under penalty of perjury, that the information in this notification is accurate and that I am the copyright owner or am authorized to act on behalf of the copyright owner.</p>
+            
+            <p><strong>Authorization:</strong> I am authorized to act on behalf of the copyright owner of the exclusive right that is allegedly infringed.</p>
+          </div>
+        </div>
+        
+        <!-- Requested Action -->
+        <div class="section">
+          <h3>📝 REQUESTED ACTION</h3>
+          <div class="info-box" style="background:#fef2f2;border-left-color:#dc2626;">
+            <p><strong>IMMEDIATE REMOVAL REQUIRED:</strong></p>
+            <ul>
+              <li>Remove or disable access to the infringing material at the URL specified above</li>
+              <li>Prevent future uploads of this copyrighted content</li>
+              <li>Confirm removal within <strong>48 hours</strong> of receipt</li>
+              <li>Provide written confirmation of action taken</li>
+            </ul>
+          </div>
+        </div>
+        
+        <!-- Response Instructions -->
+        <div class="section">
+          <h3>📧 RESPONSE REQUIRED</h3>
+          <div class="info-box">
+            <p>Please respond to this notice by:</p>
+            <ol>
+              <li>Confirming receipt of this DMCA notice</li>
+              <li>Removing the infringing content immediately</li>
+              <li>Providing confirmation of removal</li>
+              <li>Implementing measures to prevent re-upload</li>
+            </ol>
+            <p><strong>Response Deadline:</strong> 48 hours from receipt</p>
+            <p><strong>Reply To:</strong> {{ owner_email }}</p>
+          </div>
+        </div>
+        
+        <!-- Legal Consequences -->
+        <div class="section">
+          <h3>⚠️ LEGAL CONSEQUENCES OF NON-COMPLIANCE</h3>
+          <div class="info-box" style="background:#fef2f2;">
+            <p>Failure to respond to this notice may result in:</p>
+            <ul>
+              <li>Loss of DMCA safe harbor protection</li>
+              <li>Legal action for copyright infringement</li>
+              <li>Monetary damages and attorney fees</li>
+              <li>Injunctive relief</li>
+              <li>Reporting to search engines and hosting providers</li>
+            </ul>
+          </div>
+        </div>
+        
+        <!-- Contact Information -->
+        <div class="section">
+          <h3>📞 CONTACT INFORMATION</h3>
+          <div class="info-box">
+            <p>For questions regarding this notice, please contact:</p>
+            <p>
+              <strong>{{ owner_name }}</strong><br>
+              Email: {{ owner_email }}<br>
+              {% if owner_phone %}Phone: {{ owner_phone }}<br>{% endif %}
+              Reference: Violation ID {{ violation_id }}
+            </p>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Footer -->
+      <div class="footer">
+        <div class="legal-text">
+          <p><strong>DMCA COMPLIANCE NOTICE</strong></p>
+          <p>This notice is sent in accordance with the Digital Millennium Copyright Act (DMCA), 17 U.S.C. § 512. This is a legal document. Failure to comply may result in legal action.</p>
+          <p>Generated on {{ date }} | Violation ID: {{ violation_id }}</p>
+          <p>This is an automated legal notice generated by {{ app_name }} Copyright Defense System</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
