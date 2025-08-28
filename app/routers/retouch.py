@@ -1,0 +1,259 @@
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from typing import Optional
+import io
+import os
+import httpx
+import json
+import re
+import uuid as _uuid
+
+from PIL import Image, ImageEnhance, ImageFilter, ImageColor
+import numpy as np
+import cv2
+import torch
+import torch.nn.functional as F
+from torchvision.transforms.functional import normalize
+from transformers import AutoModelForImageSegmentation
+
+from app.core.config import logger
+from app.utils.storage import upload_bytes
+
+RMBG_INPUT_SIZE = [1024, 1024]
+_rmbg_model = None
+_rmbg_device = None
+_vignette_cache = {}
+
+router = APIRouter(prefix="/api/retouch", tags=["retouch"])
+
+
+# -------------------- RMBG MODEL --------------------
+def get_rmbg_model():
+    global _rmbg_model, _rmbg_device
+    if _rmbg_model is None:
+        revision = os.environ.get("RMBG_MODEL_REVISION")
+        _rmbg_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        _rmbg_model = AutoModelForImageSegmentation.from_pretrained(
+            "briaai/RMBG-1.4",
+            trust_remote_code=True,
+            revision=revision if revision else None,
+        ).to(_rmbg_device)
+        _rmbg_model.eval()
+    return _rmbg_model, _rmbg_device
+
+
+def preprocess_image(im: np.ndarray, model_input_size: list) -> torch.Tensor:
+    if im.ndim < 3:
+        im = im[:, :, np.newaxis]
+    im_tensor = torch.tensor(im, dtype=torch.float32).permute(2, 0, 1)
+    im_tensor = F.interpolate(im_tensor.unsqueeze(0), size=model_input_size, mode="bilinear", align_corners=False)
+    image = im_tensor / 255.0
+    image = normalize(image, [0.5, 0.5, 0.5], [1.0, 1.0, 1.0])
+    return image
+
+
+def postprocess_image(result: torch.Tensor, im_size: list) -> np.ndarray:
+    result = torch.squeeze(F.interpolate(result, size=im_size, mode="bilinear", align_corners=False), 0)
+    ma = torch.max(result)
+    mi = torch.min(result)
+    if (ma - mi) > 1e-7:
+        result = (result - mi) / (ma - mi)
+    else:
+        result = torch.zeros_like(result)
+    im_array = (result * 255).permute(1, 2, 0).detach().cpu().numpy().astype(np.uint8)
+    im_array = np.squeeze(im_array)
+    return im_array
+
+
+# -------------------- IMAGE UTILITIES --------------------
+async def fetch_bytes(url: str, timeout: float = 20.0) -> bytes:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.content
+
+
+def composite_onto_background(fg: Image.Image, bg: Image.Image) -> Image.Image:
+    fg_w, fg_h = fg.size
+    bg = bg.convert("RGBA")
+    if fg.mode != "RGBA":
+        fg = fg.convert("RGBA")
+
+    bg_ratio = bg.width / bg.height
+    fg_ratio = fg_w / fg_h
+    if bg_ratio > fg_ratio:
+        new_h = fg_h
+        new_w = int(bg_ratio * new_h)
+    else:
+        new_w = fg_w
+        new_h = int(new_w / bg_ratio)
+    bg_resized = bg.resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - fg_w) // 2
+    top = (new_h - fg_h) // 2
+    bg_cropped = bg_resized.crop((left, top, left + fg_w, top + fg_h))
+
+    out = Image.new("RGBA", (fg_w, fg_h))
+    out.paste(bg_cropped, (0, 0))
+    out.alpha_composite(fg)
+    return out
+
+
+# -------------------- RETOUCH ENDPOINT --------------------
+@router.post("/background")
+async def background_replace(
+    file: UploadFile = File(...),
+    background_url: Optional[str] = Form(None),
+    replace_with: Optional[str] = Form(None),
+    destination: str = Form("r2"),
+):
+    raw = await file.read()
+    if not raw:
+        return {"error": "empty file"}
+    try:
+        inp = Image.open(io.BytesIO(raw))
+
+        # Run RMBG model
+        model, device = get_rmbg_model()
+        orig_im = np.array(inp.convert("RGB"))
+        orig_size = list(orig_im.shape[0:2])
+        image = preprocess_image(orig_im, RMBG_INPUT_SIZE).to(device)
+        with torch.no_grad():
+            result = model(image)
+
+        pred = None
+        if isinstance(result, (list, tuple)):
+            pred = result[0][0]
+        elif isinstance(result, dict):
+            pred = result.get("logits") or result.get("output") or next(iter(result.values()), None)
+        else:
+            pred = result[0][0]
+
+        if not isinstance(pred, torch.Tensor):
+            raise RuntimeError("Unexpected RMBG model output type")
+
+        mask_array = postprocess_image(pred, orig_size)
+        fg = inp.convert("RGBA")
+        fg.putalpha(Image.fromarray(mask_array))
+        cut = fg
+
+        # Composite background
+        if background_url:
+            try:
+                bg_bytes = await fetch_bytes(background_url)
+                bg_img = Image.open(io.BytesIO(bg_bytes))
+                out = composite_onto_background(cut, bg_img)
+            except Exception as ex:
+                logger.exception(f"Background fetch/composite failed: {ex}")
+                return {"error": f"Background fetch/composite failed: {ex}"}
+        elif replace_with:
+            rv = replace_with.strip()
+            if rv.lower() == 'blurred':
+                out = cut
+            else:
+                try:
+                    rgb = ImageColor.getrgb(rv)
+                    bg_img = Image.new('RGBA', cut.size, rgb + (255,))
+                    out = composite_onto_background(cut, bg_img)
+                except Exception as ex:
+                    logger.exception(f"Invalid replace_with color '{rv}': {ex}")
+                    return {"error": f"Invalid replace_with color: {rv}"}
+        else:
+            out = cut
+
+        # Encode PNG
+        buf = io.BytesIO()
+        out.save(buf, format="PNG")
+        buf.seek(0)
+        base = os.path.splitext(file.filename or "image")[0]
+        suffix = _uuid.uuid4().hex[:8]
+        key = f"retouch/ai-bg/{base}-{suffix}.png"
+        url = upload_bytes(key, buf.getvalue(), content_type="image/png")
+        url_with_v = f"{url}{'&' if '?' in url else '?'}v={suffix}"
+        return {"ok": True, "url": url_with_v, "key": key}
+    except Exception as ex:
+        logger.exception(f"AI background replace failed: {ex}")
+        return {"error": str(ex)}
+
+
+# -------------------- IMAGE ADJUSTMENTS --------------------
+def precompute_vignette_mask(h, w):
+    global _vignette_cache
+    key = (h, w)
+    if key in _vignette_cache:
+        return _vignette_cache[key]
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx, cy = w/2.0, h/2.0
+    r = np.sqrt(((xx - cx)/cx)**2 + ((yy - cy)/cy)**2)
+    mask = np.clip(1.0 - r, 0.0, 1.0)
+    _vignette_cache[key] = mask
+    return mask
+
+
+def apply_image_adjustments(img: Image.Image, adjustments: dict, preview: bool = False) -> Image.Image:
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    # Downscale for preview
+    if preview:
+        img.thumbnail((512, 512), Image.LANCZOS)
+
+    # Convert to numpy
+    img_np = np.array(img).astype(np.float32) / 255.0  # HWC, RGB
+    h, w = img_np.shape[:2]
+    bgr = img_np[..., ::-1].copy()  # RGB -> BGR for OpenCV ops
+
+    # Global adjustments
+    brightness = 1.0 + adjustments.get("brightness", 0)/100.0
+    contrast = 1.0 + adjustments.get("contrast", 0)/100.0
+    saturation = 1.0 + adjustments.get("saturation", 0)/100.0
+    sharpness = adjustments.get("sharpness", 0)/100.0
+
+    # Apply brightness & contrast
+    bgr = np.clip((bgr - 0.5) * contrast + 0.5, 0, 1) * brightness
+    bgr = np.clip(bgr, 0, 1)
+
+    # Convert to HSV for saturation adjustment
+    hsv = cv2.cvtColor((bgr*255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[...,1] = np.clip(hsv[...,1]*saturation, 0, 255)
+    bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)/255.0
+
+    # Temperature / tint
+    temp = adjustments.get("temperature",0)/100.0
+    tint = adjustments.get("tint",0)/100.0
+    B, G, R = cv2.split(bgr)
+    R = np.clip(R*(1+0.15*temp),0,1)
+    B = np.clip(B*(1+0.15*(-temp)),0,1)
+    G = np.clip(G*(1+0.15*tint),0,1)
+    bgr = cv2.merge([B,G,R])
+
+    # Shadows / Highlights (simple LAB curve)
+    sh = adjustments.get("shadows",0)/100.0
+    hi = adjustments.get("highlights",0)/100.0
+    if abs(sh) > 1e-3 or abs(hi) > 1e-3:
+        lab = cv2.cvtColor((bgr*255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)/255.0
+        L, A, Bc = cv2.split(lab)
+        shadow_mask = (L<0.5).astype(np.float32)
+        highlight_mask = (L>=0.5).astype(np.float32)
+        L = np.clip(L + sh*shadow_mask*(0.5-L)*2 + hi*highlight_mask*(1-L)*2,0,1)
+        lab = cv2.merge([L,A,Bc])
+        bgr = cv2.cvtColor((lab*255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)/255.0
+
+    # Vignette
+    vig = adjustments.get("vignette",0)/100.0
+    if abs(vig) > 1e-3:
+        mask = precompute_vignette_mask(h,w)[...,None]
+        if vig>0:  # darken
+            gain = 1.0 - 0.8*vig*(1.0 - mask)
+        else:       # lighten
+            gain = 1.0 + 0.8*(-vig)*(1.0 - mask)
+        bgr = np.clip(bgr*gain,0,1)
+
+    # Sharpness
+    if sharpness>0:
+        kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]],dtype=np.float32)
+        bgr = cv2.filter2D(bgr,-1,kernel)
+    elif sharpness<0:
+        bgr = cv2.GaussianBlur(bgr,(0,0),sigmaX=-sharpness*2)
+
+    # Convert back to PIL
+    rgb = (bgr[...,::-1]*255).astype(np.uint8)
+    return Image.fromarray(rgb)
