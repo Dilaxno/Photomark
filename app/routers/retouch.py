@@ -25,6 +25,53 @@ _ai_retouch_pipe = None
 
 router = APIRouter(prefix="/api/retouch", tags=["retouch"])
 
+# ---- One-free-generation helpers ----
+from app.utils.storage import read_json_key, write_json_key
+from datetime import datetime as _dt
+from fastapi import Request
+from app.core.auth import resolve_workspace_uid
+
+def _billing_uid_from_request(request: Request) -> str:
+    eff_uid, _ = resolve_workspace_uid(request)
+    if eff_uid:
+        return eff_uid
+    try:
+        ip = request.client.host if getattr(request, 'client', None) else 'unknown'
+    except Exception:
+        ip = 'unknown'
+    return f"anon:{ip}"
+
+
+def _is_paid_customer(uid: str) -> bool:
+    try:
+        ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+        return bool(ent.get('isPaid'))
+    except Exception:
+        return False
+
+
+def _consume_one_free(uid: str, tool: str) -> bool:
+    key = f"users/{uid}/billing/free_usage.json"
+    try:
+        data = read_json_key(key) or {}
+    except Exception:
+        data = {}
+    count = int(data.get('count') or 0)
+    if count >= 1:
+        return False
+    tools = data.get('tools') or {}
+    tools[tool] = int(tools.get(tool) or 0) + 1
+    try:
+        write_json_key(key, {
+            'used': True,
+            'count': count + 1,
+            'tools': tools,
+            'updatedAt': int(_dt.utcnow().timestamp()),
+        })
+    except Exception:
+        pass
+    return True
+
 
 # ---------------- IMAGE UTILITIES ----------------
 async def fetch_bytes(url: str, timeout: float = 20.0) -> bytes:
@@ -110,11 +157,16 @@ def compute_mask(img: Image.Image) -> Image.Image:
 
 # ---------------- API ENDPOINTS ----------------
 @router.post("/remove_background")
-async def remove_background(file: UploadFile = File(...)):
+async def remove_background(request: Request, file: UploadFile = File(...)):
     """Remove background using rembg and return transparent PNG cutout."""
     raw = await file.read()
     if not raw:
         return {"error": "empty file"}
+    # Enforce one free generation unless paid
+    billing_uid = _billing_uid_from_request(request)
+    if not _is_paid_customer(billing_uid):
+        if not _consume_one_free(billing_uid, 'retouch_remove_bg'):
+            return {"error": "free_limit_reached", "message": "You have used your free generation. Upgrade to continue."}
     try:
         img = Image.open(io.BytesIO(raw))
         fg = compute_mask(img)
@@ -148,6 +200,7 @@ def _parse_hex_color(hex_color: str):
 
 @router.post("/recompose")
 async def recompose_background(
+    request: Request,
     cutout: UploadFile = File(...),
     mode: str = Form("transparent"),
     hex_color: Optional[str] = Form(None),
@@ -160,6 +213,12 @@ async def recompose_background(
         if not cut_raw:
             return {"error": "empty cutout"}
         fg = Image.open(io.BytesIO(cut_raw)).convert("RGBA")
+
+        # Enforce one free generation unless paid (for recompositions)
+        billing_uid = _billing_uid_from_request(request)
+        if not _is_paid_customer(billing_uid):
+            if not _consume_one_free(billing_uid, 'retouch_recompose'):
+                return {"error": "free_limit_reached", "message": "You have used your free generation. Upgrade to continue."}
 
         if mode == "transparent":
             out = fg

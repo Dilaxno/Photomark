@@ -11,8 +11,53 @@ from PIL import Image
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
+from app.utils.storage import read_json_key, write_json_key
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # matches existing /api/style namespace
+
+# ---- One-free-generation helpers (shared policy) ----
+from datetime import datetime as _dt
+
+def _billing_uid_from_request(request: Request) -> str:
+  eff_uid, _ = resolve_workspace_uid(request)
+  if eff_uid:
+    return eff_uid
+  try:
+    ip = request.client.host if getattr(request, 'client', None) else 'unknown'
+  except Exception:
+    ip = 'unknown'
+  return f"anon:{ip}"
+
+
+def _is_paid_customer(uid: str) -> bool:
+  try:
+    ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+    return bool(ent.get('isPaid'))
+  except Exception:
+    return False
+
+
+def _consume_one_free(uid: str, tool: str) -> bool:
+  key = f"users/{uid}/billing/free_usage.json"
+  try:
+    data = read_json_key(key) or {}
+  except Exception:
+    data = {}
+  count = int(data.get('count') or 0)
+  if count >= 1:
+    return False
+  tools = data.get('tools') or {}
+  tools[tool] = int(tools.get(tool) or 0) + 1
+  try:
+    write_json_key(key, {
+      'used': True,
+      'count': count + 1,
+      'tools': tools,
+      'updatedAt': int(_dt.utcnow().timestamp()),
+    })
+  except Exception:
+    pass
+  return True
 
 
 # ---------- Helpers ----------
@@ -152,6 +197,15 @@ async def hist_match(
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
   if not has_role_access(req_uid, eff_uid, 'convert'):
     return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+  # One-free-generation enforcement (counts against owner workspace)
+  billing_uid = eff_uid or _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'style_transfer'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
 
   try:
     # Load and prepare reference CDF (on downscaled image)

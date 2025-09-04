@@ -1,9 +1,57 @@
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
 from typing import Optional
 import io
 import os
 import uuid
+
+# One-free-generation helpers
+from app.utils.storage import read_json_key, write_json_key
+from datetime import datetime as _dt
+
+def _billing_uid_from_request(request: Optional[Request]) -> str:
+    try:
+        if request:
+            from app.core.auth import resolve_workspace_uid
+            eff_uid, _ = resolve_workspace_uid(request)
+            if eff_uid:
+                return eff_uid
+            ip = request.client.host if getattr(request, 'client', None) else 'unknown'
+            return f"anon:{ip}"
+    except Exception:
+        pass
+    return "anon:unknown"
+
+
+def _is_paid_customer(uid: str) -> bool:
+    try:
+        ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+        return bool(ent.get('isPaid'))
+    except Exception:
+        return False
+
+
+def _consume_one_free(uid: str, tool: str) -> bool:
+    key = f"users/{uid}/billing/free_usage.json"
+    try:
+        data = read_json_key(key) or {}
+    except Exception:
+        data = {}
+    count = int(data.get('count') or 0)
+    if count >= 1:
+        return False
+    tools = data.get('tools') or {}
+    tools[tool] = int(tools.get(tool) or 0) + 1
+    try:
+        write_json_key(key, {
+            'used': True,
+            'count': count + 1,
+            'tools': tools,
+            'updatedAt': int(_dt.utcnow().timestamp()),
+        })
+    except Exception:
+        pass
+    return True
 
 from PIL import Image
 
@@ -68,6 +116,7 @@ router = APIRouter(prefix="/api/retouch", tags=["retouch"])
 
 @router.post("/img2img")
 async def sd_img2img(
+    request: Optional[Request] = None,
     file: UploadFile = File(...),
     prompt: str = Form(...),
     strength: float = Form(0.8),
@@ -83,6 +132,12 @@ async def sd_img2img(
             return JSONResponse(status_code=400, content={"error": "empty file"})
 
         init_image = Image.open(io.BytesIO(raw)).convert("RGB")
+
+        # One-free-generation enforcement (counts against owner workspace or anon IP)
+        billing_uid = _billing_uid_from_request(request)
+        if not _is_paid_customer(billing_uid):
+            if not _consume_one_free(billing_uid, 'sd_img2img'):
+                return JSONResponse(status_code=402, content={"error": "free_limit_reached", "message": "You have used your free generation. Upgrade to continue."})
 
         pipe = _get_pipe()
         # Match the snippet call signature

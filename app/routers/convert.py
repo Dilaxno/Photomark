@@ -38,6 +38,40 @@ except Exception:
 
 router = APIRouter(prefix="/api", tags=["convert"])
 
+# ---- One-free-generation helpers ----
+from app.utils.storage import read_json_key, write_json_key
+from datetime import datetime as _dt
+
+def _is_paid_customer(uid: str) -> bool:
+    try:
+        ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+        return bool(ent.get('isPaid'))
+    except Exception:
+        return False
+
+
+def _consume_one_free(uid: str, tool: str) -> bool:
+    key = f"users/{uid}/billing/free_usage.json"
+    try:
+        data = read_json_key(key) or {}
+    except Exception:
+        data = {}
+    count = int(data.get('count') or 0)
+    if count >= 1:
+        return False
+    tools = data.get('tools') or {}
+    tools[tool] = int(tools.get(tool) or 0) + 1
+    try:
+        write_json_key(key, {
+            'used': True,
+            'count': count + 1,
+            'tools': tools,
+            'updatedAt': int(_dt.utcnow().timestamp()),
+        })
+    except Exception:
+        pass
+    return True
+
 SupportedTarget = Literal['psd', 'tiff', 'png', 'jpeg', 'jpg', 'gif', 'svg', 'eps', 'pdf']
 
 # =============================
@@ -192,6 +226,15 @@ async def convert_bulk(
     if not has_role_access(req_uid, eff_uid, 'convert'):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
+    # One-free-generation enforcement (counts against owner workspace)
+    billing_uid = eff_uid
+    if not _is_paid_customer(billing_uid):
+        if not _consume_one_free(billing_uid, 'convert'):
+            return JSONResponse({
+                "error": "free_limit_reached",
+                "message": "You have used your free generation. Upgrade to continue.",
+            }, status_code=402)
+
     if not WAND_AVAILABLE:
         return JSONResponse({"error": "ImageMagick/Wand not available on server"}, status_code=500)
 
@@ -291,6 +334,15 @@ async def aspect_batch(
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not has_role_access(req_uid, eff_uid, 'convert'):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    # One-free-generation enforcement (counts against owner workspace)
+    billing_uid = eff_uid
+    if not _is_paid_customer(billing_uid):
+        if not _consume_one_free(billing_uid, 'convert_aspect'):
+            return JSONResponse({
+                "error": "free_limit_reached",
+                "message": "You have used your free generation. Upgrade to continue.",
+            }, status_code=402)
 
     if not WAND_AVAILABLE:
         return JSONResponse({"error": "ImageMagick/Wand not available on server"}, status_code=500)

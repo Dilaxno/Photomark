@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from PIL import Image
 from datetime import datetime as _dt
 from app.core.auth import resolve_workspace_uid, has_role_access
-from app.utils.storage import upload_bytes
+from app.utils.storage import upload_bytes, read_json_key, write_json_key
 
 router = APIRouter(prefix="/api", tags=["color-grading"])
 
@@ -24,6 +24,50 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 # Select device based on availability
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float16 if DEVICE.type == "cuda" else torch.float32
+
+# Billing/free-limit helpers (one free generation per user across tools)
+
+def _billing_uid_from_request(request: Request) -> str:
+  eff_uid, _ = resolve_workspace_uid(request)
+  if eff_uid:
+    return eff_uid
+  try:
+    ip = request.client.host if getattr(request, 'client', None) else 'unknown'
+  except Exception:
+    ip = 'unknown'
+  return f"anon:{ip}"
+
+
+def _is_paid_customer(uid: str) -> bool:
+  try:
+    ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+    return bool(ent.get('isPaid'))
+  except Exception:
+    return False
+
+
+def _consume_one_free(uid: str, tool: str) -> bool:
+  key = f"users/{uid}/billing/free_usage.json"
+  try:
+    data = read_json_key(key) or {}
+  except Exception:
+    data = {}
+  count = int(data.get('count') or 0)
+  if count >= 1:
+    return False
+  tools = data.get('tools') or {}
+  tools[tool] = int(tools.get(tool) or 0) + 1
+  try:
+    write_json_key(key, {
+      'used': True,
+      'count': count + 1,
+      'tools': tools,
+      'updatedAt': int(_dt.utcnow().timestamp()),
+    })
+  except Exception:
+    # Best-effort write; still allow the first run
+    pass
+  return True
 
 
 def safe_filename(name: str) -> str:
@@ -193,9 +237,18 @@ def apply_lut_to_image_pil(img: Image.Image, lut: torch.Tensor) -> Image.Image:
 
 
 @router.post("/apply-lut")
-async def apply_lut(images: List[UploadFile] = File(...), lut: UploadFile = File(...)):
+async def apply_lut(request: Request, images: List[UploadFile] = File(...), lut: UploadFile = File(...)):
   if not images or not lut:
     raise HTTPException(status_code=400, detail="Images or LUT file missing")
+
+  # Enforce one free generation per user unless paid
+  billing_uid = _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'color_grading'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
 
   # Save LUT
   lut_name = safe_filename(lut.filename)
@@ -227,10 +280,19 @@ async def apply_lut(images: List[UploadFile] = File(...), lut: UploadFile = File
 
 
 @router.post("/color-grading/preview")
-async def preview(image: UploadFile = File(...), lut: UploadFile = File(...)):
+async def preview(request: Request, image: UploadFile = File(...), lut: UploadFile = File(...)):
   """Return a quick preview of a single image with the LUT applied as PNG bytes."""
   if not image or not lut:
     raise HTTPException(status_code=400, detail="Image or LUT file missing")
+
+  # Enforce one free generation per user unless paid
+  billing_uid = _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'color_grading'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
 
   # Read LUT into temp file and load
   lut_name = safe_filename(lut.filename)
@@ -266,6 +328,15 @@ async def apply_to_gallery(request: Request, images: List[UploadFile] = File(...
     raise HTTPException(status_code=400, detail="Images or LUT file missing")
 
   eff_uid, req_uid = resolve_workspace_uid(request)
+
+  # Enforce one free generation per owner workspace unless paid
+  billing_uid = eff_uid or _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'color_grading'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
   if not eff_uid or not req_uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
   # Writing to gallery uses retouch permission (same as watermark upload)
