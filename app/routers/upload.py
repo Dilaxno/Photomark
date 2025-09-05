@@ -194,3 +194,58 @@ async def upload(
         logger.warning(f"vault update failed: {ex}")
 
     return {"ok": True, "uploaded": uploaded, "vault": final_vault}
+
+
+@router.post("/api/uploads")
+async def upload_external(
+    request: Request,
+    files: List[UploadFile] = File(...),
+):
+    """Upload raw user photos (no watermark) into users/{uid}/external/.
+    - Requires gallery access for the effective workspace.
+    - Stores files under users/{uid}/external/YYYY/MM/DD/base-stamp.ext
+    - Returns list of uploaded items with keys and public URLs.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    # Gallery managers/owners can upload into their own external area
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    if not files:
+        return JSONResponse({"error": "no files"}, status_code=400)
+    if len(files) > MAX_FILES:
+        return JSONResponse({"error": f"too many files (max {MAX_FILES})"}, status_code=400)
+
+    uploaded = []
+    for uf in files:
+        try:
+            raw = await uf.read()
+            if not raw:
+                continue
+            # Determine original file extension and content-type
+            orig_ext = (os.path.splitext(uf.filename or '')[1] or '.jpg').lower()
+            if not orig_ext.startswith('.') or len(orig_ext) > 8:
+                orig_ext = '.jpg'
+            # Normalize some odd cases
+            if orig_ext not in ('.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.gif'):
+                orig_ext = '.jpg'
+            ct_map = {
+                '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+                '.heic': 'image/heic', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.gif': 'image/gif'
+            }
+            orig_ct = ct_map.get(orig_ext, 'application/octet-stream')
+
+            date_prefix = _dt.utcnow().strftime('%Y/%m/%d')
+            base = os.path.splitext(os.path.basename(uf.filename or 'upload'))[0] or 'upload'
+            stamp = int(_dt.utcnow().timestamp())
+            key = f"users/{uid}/external/{date_prefix}/{base}-{stamp}{orig_ext}"
+            url = upload_bytes(key, raw, content_type=orig_ct)
+            uploaded.append({"key": key, "url": url, "name": os.path.basename(key)})
+        except Exception as ex:
+            logger.warning(f"external upload failed for {getattr(uf,'filename', '')}: {ex}")
+            continue
+
+    return {"ok": True, "uploaded": uploaded}
