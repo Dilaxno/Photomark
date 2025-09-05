@@ -291,6 +291,126 @@ async def api_photos(
     return resp
 
 
+@router.post("/photos/rename")
+async def api_photos_rename(request: Request, payload: dict = Body(...)):
+    """Rename a photo within the user's gallery by changing the filename only.
+    - Requires gallery access.
+    - Only operates within users/{uid}/watermarked/ or users/{uid}/external/ prefixes.
+    - Renames optional sidecar JSON if present.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    uid = eff_uid
+    old_key = str((payload or {}).get("old_key") or "").strip().lstrip('/')
+    new_name = str((payload or {}).get("new_name") or "").strip()
+
+    if not old_key or not new_name:
+        return JSONResponse({"error": "old_key and new_name are required"}, status_code=400)
+
+    allowed_roots = (f"users/{uid}/watermarked/", f"users/{uid}/external/")
+    if not old_key.startswith(allowed_roots):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    # Disallow directory traversal and invalid characters
+    if ("/" in new_name) or ("\\" in new_name) or any(c in new_name for c in [":", "*", "?", '"', "<", ">", "|"]):
+        return JSONResponse({"error": "new_name contains invalid characters"}, status_code=400)
+    if new_name.lower().endswith('.json'):
+        return JSONResponse({"error": "new_name cannot end with .json"}, status_code=400)
+
+    dir_part = os.path.dirname(old_key).replace("\\", "/")
+    new_key = f"{dir_part}/{new_name}" if dir_part else new_name
+
+    if new_key == old_key:
+        # Nothing to do
+        url = None
+        if s3 and R2_BUCKET:
+            try:
+                url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{new_key}" if R2_PUBLIC_BASE_URL else None
+            except Exception:
+                url = None
+        else:
+            url = f"/static/{new_key}"
+        return {"ok": True, "key": new_key, "name": new_name, "url": url}
+
+    # Ensure destination doesn't already exist
+    if s3 and R2_BUCKET:
+        client = s3.meta.client
+        try:
+            client.head_object(Bucket=R2_BUCKET, Key=old_key)
+        except Exception:
+            return JSONResponse({"error": "Source not found"}, status_code=404)
+        try:
+            client.head_object(Bucket=R2_BUCKET, Key=new_key)
+            return JSONResponse({"error": "Destination already exists"}, status_code=409)
+        except Exception:
+            pass  # Not found -> OK
+        try:
+            client.copy_object(
+                Bucket=R2_BUCKET,
+                Key=new_key,
+                CopySource={"Bucket": R2_BUCKET, "Key": old_key},
+                MetadataDirective='COPY',
+                ACL='public-read',
+            )
+            client.delete_object(Bucket=R2_BUCKET, Key=old_key)
+            # Sidecar JSON (friend note) rename if exists
+            old_meta = f"{os.path.splitext(old_key)[0]}.json"
+            new_meta = f"{os.path.splitext(new_key)[0]}.json"
+            try:
+                client.head_object(Bucket=R2_BUCKET, Key=old_meta)
+                client.copy_object(
+                    Bucket=R2_BUCKET,
+                    Key=new_meta,
+                    CopySource={"Bucket": R2_BUCKET, "Key": old_meta},
+                    MetadataDirective='COPY',
+                    ACL='public-read',
+                )
+                client.delete_object(Bucket=R2_BUCKET, Key=old_meta)
+            except Exception:
+                pass
+            url = (
+                f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{new_key}" if R2_PUBLIC_BASE_URL else
+                client.generate_presigned_url('get_object', Params={"Bucket": R2_BUCKET, "Key": new_key}, ExpiresIn=60*60)
+            )
+            return {"ok": True, "key": new_key, "name": new_name, "url": url}
+        except Exception as ex:
+            logger.exception(f"Rename failed (R2) {old_key} -> {new_key}: {ex}")
+            # Best-effort cleanup if destination partially exists
+            try:
+                client.delete_object(Bucket=R2_BUCKET, Key=new_key)
+            except Exception:
+                pass
+            return JSONResponse({"error": "Rename failed"}, status_code=500)
+    else:
+        # Local filesystem mode
+        src_path = os.path.join(static_dir, old_key)
+        dst_path = os.path.join(static_dir, new_key)
+        if not os.path.isfile(src_path):
+            return JSONResponse({"error": "Source not found"}, status_code=404)
+        if os.path.exists(dst_path):
+            return JSONResponse({"error": "Destination already exists"}, status_code=409)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        try:
+            os.rename(src_path, dst_path)
+            # Sidecar JSON rename if exists
+            old_meta = f"{os.path.splitext(src_path)[0]}.json"
+            new_meta = f"{os.path.splitext(dst_path)[0]}.json"
+            if os.path.isfile(old_meta):
+                try:
+                    os.rename(old_meta, new_meta)
+                except Exception:
+                    pass
+            url = f"/static/{new_key}"
+            return {"ok": True, "key": new_key, "name": new_name, "url": url}
+        except Exception as ex:
+            logger.exception(f"Rename failed (local) {old_key} -> {new_key}: {ex}")
+            return JSONResponse({"error": "Rename failed"}, status_code=500)
+
+
 @router.get("/photos/external")
 async def api_photos_external(
     request: Request,
