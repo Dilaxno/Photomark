@@ -23,6 +23,9 @@ torch==2.8.0
 transformers==4.44.2
 rawpy==0.18.1
 
+# LUT generation
+PyLUT==0.2.0
+
 diffusers==0.30.3
 safetensors==0.4.4
 # Optional but recommended for performance/inference configs:
