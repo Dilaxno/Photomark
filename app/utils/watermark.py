@@ -39,9 +39,10 @@ def add_text_watermark(
     position: str = 'bottom-right',
     color: Optional[str] = None,
     opacity: Optional[float] = None,
+    bg_box: bool = False,
 ) -> Image.Image:
     """Add watermark text at a chosen position; scales with image size.
-    color: hex like #RRGGBB; opacity: 0..1
+    color: hex like #RRGGBB; opacity: 0..1; bg_box draws a semi-transparent rounded rectangle behind.
     """
     if img.mode != "RGBA":
         img = img.convert("RGBA")
@@ -85,6 +86,20 @@ def add_text_watermark(
     r, g, b = _parse_hex_color(color or '#ffffff')
     a = int(max(0.0, min(1.0, opacity if opacity is not None else 0.96)) * 255)
 
+    # Optional background box
+    if bg_box:
+        pad_x = max(6, int(base_size * 0.4))
+        pad_y = max(4, int(base_size * 0.25))
+        bx0 = max(0, x - pad_x)
+        by0 = max(0, y - int(pad_y * 0.6))
+        bx1 = min(width, x + tw + pad_x)
+        by1 = min(height, y + th + pad_y)
+        box_alpha = int(0.32 * 255)
+        try:
+            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=int(min(bx1-bx0, by1-by0) * 0.12), fill=(0, 0, 0, box_alpha))
+        except Exception:
+            draw.rectangle([bx0, by0, bx1, by1], fill=(0, 0, 0, box_alpha))
+
     # Shadow
     shadow_offset = max(1, base_size // 10)
     draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, min(200, a)))
@@ -97,8 +112,10 @@ def add_text_watermark(
     return watermarked.convert("RGB")
 
 
-def add_signature_watermark(img: Image.Image, signature_rgba: Image.Image, position: str = 'bottom-right') -> Image.Image:
-    """Overlay a signature PNG with alpha at a chosen position; scales to ~30% of width."""
+def add_signature_watermark(img: Image.Image, signature_rgba: Image.Image, position: str = 'bottom-right', bg_box: bool = False) -> Image.Image:
+    """Overlay a signature PNG with alpha at a chosen position; scales to ~30% of width.
+    bg_box draws a semi-transparent rounded rectangle behind the logo to increase robustness.
+    """
     if img.mode != "RGBA":
         base = img.convert("RGBA")
     else:
@@ -115,6 +132,22 @@ def add_signature_watermark(img: Image.Image, signature_rgba: Image.Image, posit
 
     padding = max(10, int(min(width, height) * 0.02))
     x, y = _compute_position(width, height, sig_resized.width, sig_resized.height, padding, position)
+
+    # Optional background box behind the logo
+    if bg_box:
+        pad = max(6, int(min(width, height) * 0.01))
+        bx0 = max(0, x - pad)
+        by0 = max(0, y - pad)
+        bx1 = min(width, x + sig_resized.width + pad)
+        by1 = min(height, y + sig_resized.height + pad)
+        box_alpha = int(0.35 * 255)
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        try:
+            odraw.rounded_rectangle([bx0, by0, bx1, by1], radius=int(min(bx1-bx0, by1-by0) * 0.08), fill=(0, 0, 0, box_alpha))
+        except Exception:
+            odraw.rectangle([bx0, by0, bx1, by1], fill=(0, 0, 0, box_alpha))
+        base = Image.alpha_composite(base, overlay)
 
     # Shadow/glow
     try:
