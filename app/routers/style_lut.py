@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, Request
 from starlette.responses import StreamingResponse
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 import io
 import os
 
@@ -9,11 +9,17 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 
+# PyLUT for generating .cube files from programmatic transforms
+try:
+    from pylut import LUT3D
+except Exception:
+    LUT3D = None  # handled at runtime
+
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
 from app.utils.storage import read_json_key, write_json_key
 
-router = APIRouter(prefix="/api/style", tags=["style"])
+router = APIRouter(prefix="/api/style", tags=["style"])  # includes /lut-apply and /lut/generate
 
 # ---- One-free-generation helpers ----
 from datetime import datetime as _dt
@@ -155,6 +161,85 @@ def apply_lut_gpu(img: Image.Image, lut_volume: torch.Tensor, domain_min: torch.
     return Image.fromarray(out_np, mode='RGB')
 
 
+def _eval_curve(points: List[Dict[str, float]], x: float) -> float:
+    # Linear interpolation between sorted points
+    if not points:
+        return x
+    pts = sorted(points, key=lambda p: p['x'])
+    if x <= pts[0]['x']:
+        return pts[0]['y']
+    if x >= pts[-1]['x']:
+        return pts[-1]['y']
+    for i in range(len(pts)-1):
+        a, b = pts[i], pts[i+1]
+        if a['x'] <= x <= b['x']:
+            t = (x - a['x']) / max(1e-6, (b['x'] - a['x']))
+            return a['y'] * (1-t) + b['y'] * t
+    return x
+
+
+def _apply_settings_to_rgb(r: float, g: float, b: float, s: Dict[str, Any]) -> Tuple[float, float, float]:
+    # exposure (EV)
+    k_exp = 2.0 ** float(s.get('exposure', 0.0))
+    r *= k_exp; g *= k_exp; b *= k_exp
+    # contrast
+    c = float(s.get('contrast', 1.0))
+    r = 0.5 + (r - 0.5) * c
+    g = 0.5 + (g - 0.5) * c
+    b = 0.5 + (b - 0.5) * c
+    # gamma
+    gamma = max(0.01, float(s.get('gamma', 1.0)))
+    r = r ** (1.0 / gamma); g = g ** (1.0 / gamma); b = b ** (1.0 / gamma)
+    # hue/sat/vibrance (simple HSV-like approx)
+    hue = float(s.get('hue', 0.0))
+    sat = float(s.get('saturation', 1.0))
+    vib = float(s.get('vibrance', 1.0))
+    # convert to HSL
+    mx, mn = max(r,g,b), min(r,g,b)
+    l = (mx + mn) / 2.0
+    d = mx - mn
+    if d == 0:
+        h = 0.0; s_hsl = 0.0
+    else:
+        s_hsl = d / (1 - abs(2*l - 1) + 1e-6)
+        if mx == r:
+            h = ((g - b) / (d + 1e-6)) % 6
+        elif mx == g:
+            h = (b - r) / (d + 1e-6) + 2
+        else:
+            h = (r - g) / (d + 1e-6) + 4
+        h *= 60
+    # apply hue
+    h = (h + hue) % 360
+    # apply sat/vibrance (vibrance boosts more when saturation is low)
+    s_boost = sat * (1 + (vib - 1) * (1 - s_hsl))
+    s_hsl = max(0.0, min(1.0, s_hsl * s_boost))
+    # back to RGB
+    c_h = (1 - abs(2*l - 1)) * s_hsl
+    x_h = c_h * (1 - abs(((h/60) % 2) - 1))
+    m = l - c_h/2
+    rp=gp=bp=0.0
+    if 0<=h<60: rp=c_h; gp=x_h; bp=0
+    elif 60<=h<120: rp=x_h; gp=c_h; bp=0
+    elif 120<=h<180: rp=0; gp=c_h; bp=x_h
+    elif 180<=h<240: rp=0; gp=x_h; bp=c_h
+    elif 240<=h<300: rp=x_h; gp=0; bp=c_h
+    else: rp=c_h; gp=0; bp=x_h
+    r = rp + m; g = gp + m; b = bp + m
+    # curves
+    curves = s.get('curves', {})
+    r = _eval_curve(curves.get('r', [{'x':0,'y':0},{'x':1,'y':1}]), r)
+    g = _eval_curve(curves.get('g', [{'x':0,'y':0},{'x':1,'y':1}]), g)
+    b = _eval_curve(curves.get('b', [{'x':0,'y':0},{'x':1,'y':1}]), b)
+    mcurve = curves.get('master', [{'x':0,'y':0},{'x':1,'y':1}])
+    r = _eval_curve(mcurve, r); g = _eval_curve(mcurve, g); b = _eval_curve(mcurve, b)
+    # clamp
+    r = float(max(0.0, min(1.0, r)))
+    g = float(max(0.0, min(1.0, g)))
+    b = float(max(0.0, min(1.0, b)))
+    return r, g, b
+
+
 @router.post('/lut-apply')
 async def lut_apply(
     request: Request,
@@ -208,4 +293,48 @@ async def lut_apply(
         return StreamingResponse(buf, media_type=ct, headers=headers)
     except Exception as ex:
         logger.exception(f"LUT apply failed: {ex}")
+        return {"error": str(ex)}
+
+
+@router.post('/lut/generate')
+async def lut_generate(request: Request, payload: Dict[str, Any]):
+    """
+    Generate a .cube LUT from UI settings using PyLUT and return as a downloadable file.
+    Expects payload with keys: resolution, exposure, contrast, gamma, hue, saturation, vibrance, curves{r,g,b,master}.
+    """
+    # AuthN/AuthZ similar to convert endpoint
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return {"error": "Unauthorized"}
+    if not has_role_access(req_uid, eff_uid, 'convert'):
+        return {"error": "Forbidden"}
+
+    # One-free-generation enforcement (counts against owner workspace)
+    billing_uid = eff_uid or _billing_uid_from_request(request)
+    if not _is_paid_customer(billing_uid):
+        if not _consume_one_free(billing_uid, 'style_lut'):
+            return {"error": "free_limit_reached", "message": "You have used your free generation. Upgrade to continue."}
+
+    if LUT3D is None:
+        return {"error": "PyLUT not installed"}
+
+    try:
+        size = int(payload.get('resolution') or 33)
+        size = size if size in (17,33,65) else 33
+        # Create identity LUT
+        # LUT3D.from_func expects a mapping function f(r,g,b)->(r,g,b) over [0..1]
+        def map_fn(r: float, g: float, b: float):
+            rr, gg, bb = _apply_settings_to_rgb(float(r), float(g), float(b), payload)
+            return rr, gg, bb
+        lut = LUT3D.from_func(size=size, func=map_fn)
+        # Serialize to .cube text
+        cube_text = lut.to_cube()
+        buf = io.BytesIO(cube_text.encode('utf-8'))
+        headers = {
+            'Content-Disposition': 'attachment; filename="custom.cube"',
+            'Access-Control-Expose-Headers': 'Content-Disposition',
+        }
+        return StreamingResponse(buf, media_type='text/plain', headers=headers)
+    except Exception as ex:
+        logger.exception(f"LUT generate failed: {ex}")
         return {"error": str(ex)}
