@@ -467,6 +467,36 @@ async def vaults_set_license(request: Request, payload: LicenseUpdatePayload):
 
 
 
+class VaultMetaUpdate(BaseModel):
+    vault: str
+    display_name: Optional[str] | None = None
+    order: Optional[list[str]] | None = None
+
+
+@router.post("/vaults/meta")
+async def vaults_set_meta(request: Request, payload: VaultMetaUpdate):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    v = (payload.vault or '').strip()
+    if not v:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    try:
+        safe_vault = _vault_key(uid, v)[1]
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        if payload.display_name is not None:
+            meta["display_name"] = str(payload.display_name).strip()
+        # Optional persisted order
+        if isinstance(payload.order, list):
+            existing = set(_read_vault(uid, safe_vault))
+            clean = [k for k in payload.order if isinstance(k, str) and k in existing]
+            meta["order"] = clean
+        _write_vault_meta(uid, safe_vault, meta)
+        return {"ok": True, "vault": safe_vault, "display_name": meta.get("display_name"), "order": meta.get("order")}
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
 @router.post("/vaults/unlock")
 async def vaults_unlock(request: Request, vault: str = Body(..., embed=True), password: str = Body(..., embed=True)):
     uid = get_uid_from_request(request)
@@ -500,6 +530,14 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         _lock_vault(uid, vault)
     try:
         keys = _read_vault(uid, vault)
+        # Apply optional explicit order from meta if present
+        try:
+            order = meta.get("order") if isinstance(meta, dict) else None
+            if isinstance(order, list) and order:
+                order_index = {k: i for i, k in enumerate(order)}
+                keys = sorted(keys, key=lambda k: order_index.get(k, 10**9))
+        except Exception:
+            pass
         items: list[dict] = []
         if s3 and R2_BUCKET:
             # Build lookup of originals to attach to items
@@ -689,6 +727,57 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         return JSONResponse({"error": "Failed to send email"}, status_code=500)
 
     return {"ok": True, "link": link, "expires_at": expires_at_iso}
+
+
+@router.post("/vaults/share_link")
+async def vaults_share_link(request: Request, payload: dict = Body(...)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    vault = str((payload or {}).get('vault') or '').strip()
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+
+    # Validate vault exists and get normalized name
+    try:
+        _ = _read_vault(uid, vault)
+        safe_vault = _vault_key(uid, vault)[1]
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    expires_at_str = (payload or {}).get('expires_at')
+    expires_in_days = (payload or {}).get('expires_in_days')
+    now = datetime.utcnow()
+    if expires_at_str:
+        try:
+            exp = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            if not exp.tzinfo:
+                exp = exp.replace(tzinfo=None)
+            expires_at_iso = exp.isoformat()
+        except Exception:
+            return JSONResponse({"error": "invalid expires_at"}, status_code=400)
+    else:
+        days = int(expires_in_days or 7)
+        exp = now + timedelta(days=days)
+        expires_at_iso = exp.isoformat()
+
+    token = secrets.token_urlsafe(24)
+    rec = {
+        "token": token,
+        "uid": uid,
+        "vault": safe_vault,
+        "email": "",
+        "expires_at": expires_at_iso,
+        "used": False,
+        "created_at": now.isoformat(),
+        "max_uses": 0,  # unlimited until expiration
+    }
+    _write_json_key(_share_key(token), rec)
+
+    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    link = f"{front}/#share?token={token}"
+    return {"ok": True, "link": link, "token": token, "expires_at": expires_at_iso}
 
 
 @router.get("/vaults/shared/photos")
