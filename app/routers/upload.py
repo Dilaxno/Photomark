@@ -43,6 +43,8 @@ async def upload(
     tile_angle: Optional[float] = Form(None),
     tile_spacing: Optional[float] = Form(None),
     tile_scale: Optional[float] = Form(None),
+    # Single-layout background box flag
+    wm_bg_box: Optional[str] = Form(None),  # '1' to enable background box on single watermark
     artist: Optional[str] = Form(None),
     invisible: Optional[str] = Form(None),  # '1' to embed invisible signature
     # Destination options
@@ -107,7 +109,12 @@ async def upload(
                         scale_mul=float(tile_scale or 1.0),
                     )
                 else:
-                    out = add_signature_watermark(img, sig, wm_pos)
+                    out = add_signature_watermark(
+                        img,
+                        sig,
+                        wm_pos,
+                        bg_box=((wm_bg_box or '').strip() == '1')
+                    )
             else:
                 if layout == 'tiled':
                     out = add_text_watermark_tiled(
@@ -126,6 +133,7 @@ async def upload(
                         wm_pos,
                         color=wm_color or None,
                         opacity=wm_opacity if wm_opacity is not None else None,
+                        bg_box=((wm_bg_box or '').strip() == '1')
                     )
 
             # Optionally embed invisible signature linked to the account uid
