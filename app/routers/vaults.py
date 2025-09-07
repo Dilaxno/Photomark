@@ -1049,9 +1049,31 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
     return_url = f"{front}/#share?token={token}"
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            # Create dynamic one-time payment link
-            url = f"{DODO_API_BASE}/v1/payment-links"  # check the exact API path in docs
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Endpoint is configurable; default legacy path kept for compatibility
+            base = DODO_API_BASE.rstrip("/")
+            path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
+            if not path.startswith("/"):
+                path = "/" + path
+            url = f"{base}{path}"
+
+            payload = {
+                "amount": amount,
+                "currency": currency,
+                "quantity": 1,
+                "payment_link": True,
+                "return_url": return_url,
+                "metadata": {"token": token, "uid": uid, "vault": vault},
+            }
+            # Include business_id when available (required by some environments)
+            try:
+                from app.core.config import os
+                bid = os.getenv("DODO_BUSINESS_ID", "").strip()
+                if bid:
+                    payload["business_id"] = bid
+            except Exception:
+                pass
+
             resp = await client.post(
                 url,
                 headers={
@@ -1059,14 +1081,7 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
-                json={
-                    "amount": amount,
-                    "currency": currency,
-                    "quantity": 1,  # always 1 by default
-                    "payment_link": True,
-                    "return_url": return_url,
-                    "metadata": {"token": token, "uid": uid, "vault": vault},
-                },
+                json=payload,
             )
 
         text = getattr(resp, "text", None)
@@ -1077,17 +1092,23 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
 
         if resp is None or resp.status_code >= 400:
             err_detail = (data.get("error") if isinstance(data, dict) else None) or (text or "").strip() or "unknown error"
-            raise RuntimeError(f"payment link create failed ({getattr(resp,'status_code',0)}): {err_detail}")
+            logger.warning(f"Dodo payment link create failed {getattr(resp,'status_code',0)} at {url}: {err_detail}")
+            return JSONResponse({"error": f"provider_error: {err_detail}"}, status_code=502)
 
         if not isinstance(data, dict):
-            raise RuntimeError("invalid response from payment provider")
+            logger.warning(f"Dodo payment response not JSON at {url}: {text}")
+            return JSONResponse({"error": "invalid provider response"}, status_code=502)
 
         checkout_url = data.get("checkout_url") or data.get("url")
         if not checkout_url:
-            raise RuntimeError("no checkout url returned")
+            logger.warning(f"Dodo payment response missing checkout URL: {data}")
+            return JSONResponse({"error": "no checkout url returned"}, status_code=502)
 
         return {"checkout_url": checkout_url}
 
+    except httpx.HTTPError as he:
+        logger.warning(f"Dodo checkout network error: {he}")
+        return JSONResponse({"error": "network error"}, status_code=502)
     except Exception as ex:
         logger.warning(f"Dodo checkout error: {ex}")
         return JSONResponse({"error": "checkout failed"}, status_code=502)
