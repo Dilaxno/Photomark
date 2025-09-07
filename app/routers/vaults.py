@@ -1049,62 +1049,50 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
     return_url = f"{front}/#share?token={token}"
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Endpoint is configurable; default legacy path kept for compatibility
-            base = DODO_API_BASE.rstrip("/")
-            path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
-            if not path.startswith("/"):
-                path = "/" + path
-            url = f"{base}{path}"
+        # Build payload variants using shared Dodo helper
+        from app.utils.dodo import create_checkout_link
 
-            payload = {
+        base_metadata = {"token": token, "uid": uid, "vault": vault}
+        business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
+        brand_id = (os.getenv("DODO_BRAND_ID") or "").strip()
+        common_top = {**({"business_id": business_id} if business_id else {}), **({"brand_id": brand_id} if brand_id else {})}
+
+        alt_payloads = [
+            {
+                **common_top,
                 "amount": amount,
                 "currency": currency,
                 "quantity": 1,
-                "payment_link": True,
+                "metadata": base_metadata,
                 "return_url": return_url,
-                "metadata": {"token": token, "uid": uid, "vault": vault},
-            }
-            # Include business_id when available (required by some environments)
-            try:
-                from app.core.config import os
-                bid = os.getenv("DODO_BUSINESS_ID", "").strip()
-                if bid:
-                    payload["business_id"] = bid
-            except Exception:
-                pass
+            },
+            {
+                **common_top,
+                "amount": amount,
+                "currency": currency,
+                "payment_link": True,
+                "metadata": base_metadata,
+                "return_url": return_url,
+            },
+            {
+                **common_top,
+                "items": [{"amount": amount, "currency": currency, "quantity": 1}],
+                "metadata": base_metadata,
+                "return_url": return_url,
+            },
+            {
+                **common_top,
+                "payment_details": {"amount": amount, "currency": currency, "quantity": 1},
+                "metadata": base_metadata,
+                "return_url": return_url,
+            },
+        ]
 
-            resp = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {DODO_API_KEY}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json=payload,
-            )
-
-        text = getattr(resp, "text", None)
-        try:
-            data = resp.json()
-        except Exception:
-            data = None
-
-        if resp is None or resp.status_code >= 400:
-            err_detail = (data.get("error") if isinstance(data, dict) else None) or (text or "").strip() or "unknown error"
-            logger.warning(f"Dodo payment link create failed {getattr(resp,'status_code',0)} at {url}: {err_detail}")
-            return JSONResponse({"error": f"provider_error: {err_detail}"}, status_code=502)
-
-        if not isinstance(data, dict):
-            logger.warning(f"Dodo payment response not JSON at {url}: {text}")
-            return JSONResponse({"error": "invalid provider response"}, status_code=502)
-
-        checkout_url = data.get("checkout_url") or data.get("url")
-        if not checkout_url:
-            logger.warning(f"Dodo payment response missing checkout URL: {data}")
-            return JSONResponse({"error": "no checkout url returned"}, status_code=502)
-
-        return {"checkout_url": checkout_url}
+        link, details = await create_checkout_link(alt_payloads)
+        if link:
+            return {"checkout_url": link}
+        logger.warning(f"[vaults.checkout] failed to create payment link: {details}")
+        return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
 
     except httpx.HTTPError as he:
         logger.warning(f"Dodo checkout network error: {he}")
