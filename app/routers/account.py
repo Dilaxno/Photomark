@@ -243,6 +243,10 @@ def _email_change_key(uid: str) -> str:
     return f"auth/email_change/{uid}.json"
 
 
+def _password_change_key(uid: str) -> str:
+    return f"auth/password_change/{uid}.json"
+
+
 @router.post("/email/change/init")
 async def email_change_init(request: Request, payload: dict = Body(...)):
     """
@@ -370,6 +374,121 @@ async def email_change_confirm(request: Request, payload: dict = Body(...)):
     except Exception as ex:
         logger.warning(f"email change confirm (otp) error for {uid}: {ex}")
         return JSONResponse({"error": "Failed to confirm email change"}, status_code=400)
+
+
+@router.post("/password/change/init")
+async def password_change_init(request: Request):
+    """
+    Start password change (or set) with OTP verification. Sends a 6-digit code to the
+    user's current email. Client should perform reauthentication for email/password
+    accounts before calling this (frontend enforced), but server verifies via OTP.
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password change unavailable"}, status_code=500)
+
+    try:
+        # Get current email to deliver the code
+        user = fb_auth.get_user(uid)
+        current_email = (getattr(user, "email", None) or "").strip()
+        if not current_email:
+            return JSONResponse({"error": "current email unavailable"}, status_code=400)
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        now = datetime.utcnow()
+        rec = {
+            "code": code,
+            "sent_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=15)).isoformat(),
+            "attempts": 0,
+        }
+        write_json_key(_password_change_key(uid), rec)
+
+        subject = "Verify your password change"
+        intro = (
+            "We received a request to change the password on your account. "
+            f"Use this verification code to confirm: <b>{code}</b><br><br>"
+            "This code expires in 15 minutes. If you didn't request this, you can ignore this email."
+        )
+        html = render_email(
+            "email_basic.html",
+            title="Confirm your password change",
+            intro=intro,
+            footer_note=f"Request time (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        ok = send_email_smtp(current_email, subject, html)
+        if not ok:
+            return JSONResponse({"error": "failed to send verification email"}, status_code=500)
+        return {"ok": True}
+    except Exception as ex:
+        logger.warning(f"password change init failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to start password change"}, status_code=400)
+
+
+@router.post("/password/change/confirm")
+async def password_change_confirm(request: Request, payload: dict = Body(...)):
+    """
+    Confirm password change with OTP code and set the new password.
+    Body: { "code": str, "new_password": str }
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password change unavailable"}, status_code=500)
+
+    code = str((payload or {}).get("code") or "").strip()
+    new_password = str((payload or {}).get("new_password") or "")
+    if not code:
+        return JSONResponse({"error": "verification code required"}, status_code=400)
+    if not new_password or len(new_password) < 6:
+        return JSONResponse({"error": "Password must be at least 6 characters"}, status_code=400)
+
+    try:
+        rec = read_json_key(_password_change_key(uid)) or {}
+        saved_code = str(rec.get("code") or "").strip()
+        attempts = int(rec.get("attempts") or 0)
+        exp_str = rec.get("expires_at")
+
+        if not saved_code or not exp_str:
+            return JSONResponse({"error": "no pending password change"}, status_code=400)
+
+        try:
+            exp = datetime.fromisoformat(exp_str)
+        except Exception:
+            exp = datetime.utcnow() - timedelta(seconds=1)
+        if datetime.utcnow() > exp:
+            write_json_key(_password_change_key(uid), {})
+            return JSONResponse({"error": "verification code expired"}, status_code=400)
+
+        if code != saved_code:
+            attempts += 1
+            rec["attempts"] = attempts
+            if attempts >= 5:
+                write_json_key(_password_change_key(uid), {})
+                return JSONResponse({"error": "too many invalid attempts"}, status_code=429)
+            write_json_key(_password_change_key(uid), rec)
+            return JSONResponse({"error": "invalid verification code"}, status_code=400)
+
+        # Update password
+        try:
+            fb_auth.update_user(uid, password=new_password)
+        except Exception as ex:
+            logger.warning(f"password change confirm failed for {uid}: {ex}")
+            return JSONResponse({"error": "Failed to update password"}, status_code=400)
+
+        # Clear pending request
+        write_json_key(_password_change_key(uid), {})
+        return {"ok": True}
+    except Exception as ex:
+        logger.warning(f"password change confirm (otp) error for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to confirm password change"}, status_code=400)
 
 
 @router.post("/delete")
