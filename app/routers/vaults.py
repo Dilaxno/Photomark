@@ -28,6 +28,11 @@ class ApprovalPayload(BaseModel):
     action: str  # 'approve' or 'deny'
     comment: str | None = None
 
+class FavoritePayload(BaseModel):
+    token: str
+    key: str
+    favorite: bool
+
 # Local static dir used when s3 is not configured
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
 
@@ -39,6 +44,10 @@ def _share_key(token: str) -> str:
 def _approval_key(uid: str, vault: str) -> str:
     safe = "".join(c for c in vault if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
     return f"users/{uid}/vaults/_approvals/{safe}.json"
+
+def _favorites_key(uid: str, vault: str) -> str:
+    safe = "".join(c for c in vault if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
+    return f"users/{uid}/vaults/_favorites/{safe}.json"
 
 
 from app.utils.invisible_mark import detect_signature, PAYLOAD_LEN
@@ -903,7 +912,10 @@ async def vaults_shared_photos(token: str):
         price_cents = 0
         currency = "USD"
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "licensed": licensed, "price_cents": price_cents, "currency": currency}
+    # Load favorites map
+    favorites = _read_json_key(_favorites_key(uid, vault)) or {}
+
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
@@ -997,6 +1009,55 @@ async def vaults_shared_approve(payload: ApprovalPayload):
     # Return current status for this photo
     by_email = (data.get("by_photo", {}).get(photo_key, {}).get("by_email", {}))
     return {"ok": True, "photo": photo_key, "by_email": by_email}
+
+
+@router.post("/vaults/shared/favorite")
+async def vaults_shared_favorite(payload: FavoritePayload):
+    token = (payload.token or "").strip()
+    photo_key = (payload.key or "").strip()
+    favorite = bool(payload.favorite)
+    if not token or not photo_key:
+        return JSONResponse({"error": "token and key required"}, status_code=400)
+
+    rec = _read_json_key(_share_key(token))
+    if not rec:
+        return JSONResponse({"error": "invalid token"}, status_code=400)
+
+    # Expiry check
+    try:
+        exp = datetime.fromisoformat(str(rec.get('expires_at', '')))
+    except Exception:
+        exp = None
+    now = datetime.utcnow()
+    if exp and now > exp:
+        return JSONResponse({"error": "expired"}, status_code=410)
+
+    uid = rec.get('uid') or ''
+    vault = rec.get('vault') or ''
+    client_email = (rec.get('email') or '').lower()
+    if not uid or not vault:
+        return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Validate belongs to vault
+    try:
+        keys = _read_vault(uid, vault)
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+    if photo_key not in keys:
+        return JSONResponse({"error": "photo not in vault"}, status_code=400)
+
+    # Update favorites structure: { by_photo: { key: { by_email: { email: { favorite: true, at } } } } }
+    data = _read_json_key(_favorites_key(uid, vault)) or {}
+    by_photo = data.get("by_photo") or {}
+    photo = by_photo.get(photo_key) or {}
+    by_email = photo.get("by_email") or {}
+    by_email[client_email] = {"favorite": favorite, "at": datetime.utcnow().isoformat()}
+    photo["by_email"] = by_email
+    by_photo[photo_key] = photo
+    data["by_photo"] = by_photo
+    _write_json_key(_favorites_key(uid, vault), data)
+
+    return {"ok": True, "photo": photo_key, "favorite": favorite}
 
 
 @router.get("/vaults/approvals")
