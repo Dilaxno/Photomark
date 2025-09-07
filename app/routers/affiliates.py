@@ -400,6 +400,7 @@ async def affiliates_track_signup_verified(request: Request):
                     recents = list(prof.get('recent_referrals') or [])
                     recents.insert(0, {
                         'name': name,
+                        'user_uid': uid,
                         'signup_date': datetime.utcnow(),
                         'status': status,
                         'plan': plan,
@@ -408,6 +409,38 @@ async def affiliates_track_signup_verified(request: Request):
                     if len(recents) > 100:
                         recents = recents[:100]
                     prof_ref.set({ 'recent_referrals': recents, 'updatedAt': datetime.utcnow() }, merge=True)
+
+                    # Notify affiliate via email about new signup (best-effort)
+                    try:
+                        aff_email = (prof.get('email') or None)
+                        if aff_email:
+                            app_name = os.getenv("APP_NAME", "Photomark")
+                            front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                            subject = "New referral signup"
+                            intro_html = (
+                                f"Good news! A new user signed up via your referral link.<br><br>"
+                                f"<b>User:</b> {name}<br>"
+                                f"<b>Plan:</b> {plan}<br><br>"
+                                f"View your dashboard: <a href=\"{front}/#affiliate-dashboard\">Affiliate Dashboard</a>"
+                            )
+                            html = render_email(
+                                "email_basic.html",
+                                title="New referral signup",
+                                intro=intro_html,
+                                button_label="Open Dashboard",
+                                button_url=f"{front}/#affiliate-dashboard",
+                            )
+                            send_email_smtp(
+                                aff_email,
+                                subject,
+                                html,
+                                None,
+                                from_addr=os.getenv("MAIL_FROM_AFFILIATES", "affiliates@photomark.cloud"),
+                                reply_to=os.getenv("REPLY_TO_AFFILIATES", "affiliates@photomark.cloud"),
+                                from_name=os.getenv("MAIL_FROM_NAME_AFFILIATES", "Photomark Partnerships"),
+                            )
+                    except Exception as _ex:
+                        logger.warning(f"[affiliates.signup_verified] email notify failed: {_ex}")
                 except Exception as _ex:
                     logger.warning(f"[affiliates.signup_verified] recent_referrals append failed: {_ex}")
         except Exception:

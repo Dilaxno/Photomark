@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 import os
 import json
+from datetime import datetime
 
 from app.core.config import logger
 from standardwebhooks import Webhook, WebhookVerificationError
@@ -360,6 +361,97 @@ async def pricing_webhook(request: Request):
         })
     except Exception:
         pass
+
+    # --- Step 8: Attribute sale to affiliate if exists ---
+    try:
+        from app.routers.affiliates import _stats_key as _a_stats_key, _attrib_key as _a_attrib_key, _get_fs_client as _aff_get_fs_client  # type: ignore
+    except Exception:
+        _a_stats_key = None; _a_attrib_key = None; _aff_get_fs_client = _get_fs_client
+
+    try:
+        # Read attribution
+        attrib = read_json_key(f"affiliates/attributions/{uid}.json") or {}
+        affiliate_uid = attrib.get('affiliate_uid')
+        if affiliate_uid:
+            # Update local stats
+            a_stats = read_json_key(f"affiliates/{affiliate_uid}/stats.json") or {}
+            a_stats['conversions'] = int(a_stats.get('conversions') or 0) + 1
+            # Simple pricing: derive gross from plan
+            price = 0
+            if plan == 'photographers':
+                price = 8900
+            elif plan == 'agencies':
+                price = 16900
+            a_stats['gross_cents'] = int(a_stats.get('gross_cents') or 0) + int(price)
+            # 40% commission
+            commission = int(round(price * 0.40))
+            a_stats['payout_cents'] = int(a_stats.get('payout_cents') or 0) + commission
+            a_stats['currency'] = (a_stats.get('currency') or 'usd').lower()
+            a_stats['last_conversion_at'] = datetime.utcnow().isoformat()
+            write_json_key(f"affiliates/{affiliate_uid}/stats.json", a_stats)
+
+            # Mirror to Firestore and update recent_referrals status to paid
+            try:
+                db = _get_fs_client()
+                if db and fb_fs:
+                    db.collection('affiliate_stats').document(affiliate_uid).set({
+                        **a_stats,
+                        'uid': affiliate_uid,
+                        'updatedAt': fb_fs.SERVER_TIMESTAMP,
+                    }, merge=True)
+                    # Update affiliate_profiles recent_referrals status for this user
+                    prof_ref = db.collection('affiliate_profiles').document(affiliate_uid)
+                    prof_snap = prof_ref.get()
+                    if prof_snap.exists:
+                        prof = prof_snap.to_dict() or {}
+                        recents = list(prof.get('recent_referrals') or [])
+                        changed = False
+                        for r in recents:
+                            try:
+                                if r.get('user_uid') == uid:
+                                    r['status'] = 'paid'
+                                    r['plan'] = plan
+                                    changed = True
+                                    break
+                            except Exception:
+                                pass
+                        if changed:
+                            prof_ref.set({ 'recent_referrals': recents, 'updatedAt': fb_fs.SERVER_TIMESTAMP }, merge=True)
+
+                        # Email the affiliate about the sale
+                        try:
+                            aff_email = prof.get('email')
+                            if aff_email:
+                                front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                                subject = "New referral sale"
+                                intro_html = (
+                                    f"You just earned a commission from a referral!<br><br>"
+                                    f"<b>Plan:</b> {plan}<br>"
+                                    f"<b>Commission:</b> ${commission/100:.2f}<br><br>"
+                                    f"View your dashboard: <a href=\"{front}/#affiliate-dashboard\">Affiliate Dashboard</a>"
+                                )
+                                html = render_email(
+                                    "email_basic.html",
+                                    title="New referral sale",
+                                    intro=intro_html,
+                                    button_label="Open Dashboard",
+                                    button_url=f"{front}/#affiliate-dashboard",
+                                )
+                                send_email_smtp(
+                                    aff_email,
+                                    subject,
+                                    html,
+                                    None,
+                                    from_addr=os.getenv("MAIL_FROM_AFFILIATES", "affiliates@photomark.cloud"),
+                                    reply_to=os.getenv("REPLY_TO_AFFILIATES", "affiliates@photomark.cloud"),
+                                    from_name=os.getenv("MAIL_FROM_NAME_AFFILIATES", "Photomark Partnerships"),
+                                )
+                        except Exception:
+                            pass
+            except Exception as ex:
+                logger.warning(f"[pricing.webhook] affiliate mirror failed: {ex}")
+    except Exception as ex:
+        logger.warning(f"[pricing.webhook] affiliate attribution error: {ex}")
 
     logger.info(f"[pricing.webhook] completed upgrade: uid={uid} plan={plan}")
     return {"ok": True, "upgraded": True, "uid": uid, "plan": plan}
