@@ -801,6 +801,99 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     return {"ok": True, "link": link, "expires_at": expires_at_iso}
 
 
+@router.post("/vaults/publish")
+async def vaults_publish(request: Request, payload: dict = Body(...)):
+    """Publish a static share page to public storage with a vanity path: /{handle}/vault.
+    Returns the public URL. The page embeds the existing share experience (UI hidden) via an iframe.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    vault = str((payload or {}).get('vault') or '').strip()
+    custom_handle = str((payload or {}).get('handle') or '').strip()
+    expires_in_days = (payload or {}).get('expires_in_days')
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+
+    # Validate and normalize vault name
+    try:
+        _ = _read_vault(uid, vault)
+        safe_vault = _vault_key(uid, vault)[1]
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    # Create a share token (unlimited uses until expiration)
+    now = datetime.utcnow()
+    days = int(expires_in_days or 365)
+    exp = now + timedelta(days=days)
+    token = secrets.token_urlsafe(24)
+    rec = {
+        "token": token,
+        "uid": uid,
+        "vault": safe_vault,
+        "email": "",
+        "expires_at": exp.isoformat(),
+        "used": False,
+        "created_at": now.isoformat(),
+        "max_uses": 0,
+    }
+    _write_json_key(_share_key(token), rec)
+
+    # Build a handle from provided handle or user email local-part
+    def slugify(s: str) -> str:
+        s2 = ''.join([c if (c.isalnum() or c in ('-', '_')) else '-' for c in (s or '').strip()]).strip('-_')
+        s2 = s2.replace('_','-').lower()
+        return s2 or 'user'
+    handle = slugify(custom_handle)
+    if not handle:
+        try:
+            email = (get_user_email_from_uid(uid) or '').strip()
+            handle = slugify(email.split('@')[0] if '@' in email else email)
+        except Exception:
+            handle = slugify(uid[:8])
+    # Ensure uniqueness by adding short token suffix
+    suffix = token[:6].lower()
+    handle_final = f"{handle}-{suffix}"
+
+    # Compose public path and URL
+    # Path: users/{uid}/published/{handle_final}/vault/index.html
+    key = f"users/{uid}/published/{handle_final}/vault/index.html"
+
+    # Frontend origin for iframe source
+    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    share_url = f"{front}/#share?token={token}&hide_ui=1"
+
+    # Minimal standalone HTML that fills viewport and embeds the share experience
+    html = f"""
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{safe_vault} — Vault</title>
+  <meta name=\"robots\" content=\"noindex\" />
+  <style>
+    html,body,iframe{{margin:0;padding:0;height:100%;width:100%;background:#0b0b0b;color:#e5e5e5}}
+    .frame{{position:fixed;inset:0;border:0;width:100%;height:100%}}
+  </style>
+</head>
+<body>
+  <iframe class=\"frame\" src=\"{share_url}\" allowfullscreen referrerpolicy=\"no-referrer\"></iframe>
+</body>
+</html>
+"""
+    try:
+        url = upload_bytes(key, html.encode('utf-8'), content_type="text/html; charset=utf-8")
+        # If upload_bytes returns a signed URL, try to compose public URL via R2_PUBLIC_BASE_URL
+        if R2_PUBLIC_BASE_URL:
+            url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+        return {"ok": True, "url": url, "handle": handle_final, "token": token, "expires_at": rec["expires_at"]}
+    except Exception as ex:
+        logger.warning(f"publish share failed: {ex}")
+        return JSONResponse({"error": "publish_failed"}, status_code=500)
+
+
 @router.post("/vaults/share_link")
 async def vaults_share_link(request: Request, payload: dict = Body(...)):
     uid = get_uid_from_request(request)
