@@ -6,12 +6,12 @@ import io
 import zipfile
 import httpx
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
-from app.utils.storage import read_json_key, write_json_key, read_bytes_key
+from app.utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
 from app.core.auth import get_uid_from_request, get_user_email_from_uid
 from app.utils.emailing import render_email, send_email_smtp
 
@@ -499,6 +499,11 @@ class VaultMetaUpdate(BaseModel):
     vault: str
     display_name: Optional[str] | None = None
     order: Optional[list[str]] | None = None
+    share_hide_ui: Optional[bool] | None = None
+    share_color: Optional[str] | None = None
+    share_layout: Optional[str] | None = None  # 'grid' | 'masonry'
+    share_logo_url: Optional[str] | None = None
+    descriptions: Optional[dict[str, str]] | None = None
 
 
 @router.post("/vaults/meta")
@@ -519,8 +524,41 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate):
             existing = set(_read_vault(uid, safe_vault))
             clean = [k for k in payload.order if isinstance(k, str) and k in existing]
             meta["order"] = clean
+        # Share customization
+        if payload.share_hide_ui is not None:
+            meta["share_hide_ui"] = bool(payload.share_hide_ui)
+        if payload.share_color is not None:
+            meta["share_color"] = str(payload.share_color).strip()
+        if payload.share_layout is not None:
+            lay = (payload.share_layout or 'grid').strip().lower()
+            if lay not in ("grid", "masonry"):
+                lay = "grid"
+            meta["share_layout"] = lay
+        if payload.share_logo_url is not None:
+            meta["share_logo_url"] = str(payload.share_logo_url).strip()
+        if isinstance(payload.descriptions, dict):
+            # Merge into existing descriptions map
+            existing_desc = meta.get("descriptions") or {}
+            if not isinstance(existing_desc, dict):
+                existing_desc = {}
+            clean_desc: dict[str, str] = {}
+            for k, v in payload.descriptions.items():
+                try:
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    if ks and vs:
+                        clean_desc[ks] = vs
+                except Exception:
+                    continue
+            existing_desc.update(clean_desc)
+            meta["descriptions"] = existing_desc
         _write_vault_meta(uid, safe_vault, meta)
-        return {"ok": True, "vault": safe_vault, "display_name": meta.get("display_name"), "order": meta.get("order")}
+        return {"ok": True, "vault": safe_vault, "display_name": meta.get("display_name"), "order": meta.get("order"), "share": {
+            "hide_ui": bool(meta.get("share_hide_ui")),
+            "color": str(meta.get("share_color") or ""),
+            "layout": str(meta.get("share_layout") or "grid"),
+            "logo_url": str(meta.get("share_logo_url") or ""),
+        }}
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
@@ -814,6 +852,38 @@ async def vaults_share_link(request: Request, payload: dict = Body(...)):
     return {"ok": True, "link": link, "token": token, "expires_at": expires_at_iso}
 
 
+@router.post("/vaults/share/logo")
+async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True), file: UploadFile = File(...)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not vault or not file:
+        return JSONResponse({"error": "vault and file required"}, status_code=400)
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        name = file.filename or "logo"
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".svg"):
+            ext = ".png"
+        ct = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }.get(ext, "application/octet-stream")
+        data = await file.read()
+        date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
+        key = f"users/{uid}/vaults/_meta/{safe_vault}/branding/{date_prefix}/logo{ext}"
+        url = upload_bytes(key, data, content_type=ct)
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        meta["share_logo_url"] = url
+        _write_vault_meta(uid, safe_vault, meta)
+        return {"ok": True, "logo_url": url}
+    except Exception as ex:
+        logger.warning(f"share logo upload failed: {ex}")
+        return JSONResponse({"error": "upload failed"}, status_code=500)
+
 @router.get("/vaults/shared/photos")
 async def vaults_shared_photos(token: str):
     if not token or len(token) < 10:
@@ -940,7 +1010,30 @@ async def vaults_shared_photos(token: str):
     # Load favorites map
     favorites = _read_json_key(_favorites_key(uid, vault)) or {}
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency}
+    # Share customization and descriptions
+    share = {}
+    try:
+        mmeta = _read_vault_meta(uid, vault) or {}
+        share = {
+            "hide_ui": bool(mmeta.get("share_hide_ui")),
+            "color": str(mmeta.get("share_color") or ""),
+            "layout": str(mmeta.get("share_layout") or "grid"),
+            "logo_url": str(mmeta.get("share_logo_url") or ""),
+        }
+        dmap = mmeta.get("descriptions") or {}
+        if isinstance(dmap, dict):
+            for it in items:
+                try:
+                    k = it.get("key") or ""
+                    desc = dmap.get(k)
+                    if isinstance(desc, str) and desc.strip():
+                        it["desc"] = desc
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency, "share": share}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
