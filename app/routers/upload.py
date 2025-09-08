@@ -15,7 +15,7 @@ from app.utils.watermark import (
     add_text_watermark_tiled,
     add_signature_watermark_tiled,
 )
-from app.utils.storage import upload_bytes
+from app.utils.storage import upload_bytes, read_json_key
 from app.utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
 
 # Import vault helpers to update vaults after upload
@@ -224,8 +224,26 @@ async def upload_external(
 
     if not files:
         return JSONResponse({"error": "no files"}, status_code=400)
-    if len(files) > MAX_FILES:
-        return JSONResponse({"error": f"too many files (max {MAX_FILES})"}, status_code=400)
+
+    # Dynamic per-plan cap: photographers/agencies get higher limit if configured
+    max_cap = MAX_FILES
+    try:
+        ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+        plan = str(ent.get("plan") or "").lower()
+        is_paid = bool(ent.get("isPaid") or False)
+        import os
+        paid_cap = int(os.getenv("UPLOAD_MAX_PAID", "1000"))
+        free_cap = int(os.getenv("UPLOAD_MAX_FREE", str(MAX_FILES)))
+        # Normalize known paid plans to get 1000 cap by default
+        if is_paid and ("agenc" in plan or "photograph" in plan):
+            max_cap = max(MAX_FILES, min(paid_cap, 5000))
+        else:
+            max_cap = free_cap if not is_paid else min(paid_cap, 5000)
+    except Exception:
+        max_cap = MAX_FILES
+
+    if len(files) > max_cap:
+        return JSONResponse({"error": f"too many files (max {max_cap})"}, status_code=400)
 
     uploaded = []
     for uf in files:
