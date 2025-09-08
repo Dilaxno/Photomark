@@ -17,6 +17,9 @@ from app.utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api", tags=["vaults"]) 
 
+# Special vault machine name used historically for collaborator uploads
+FRIENDS_VAULT_SAFE = "Photos_sent_by_friends" 
+
 class CheckoutPayload(BaseModel):
     token: str
 
@@ -292,7 +295,15 @@ async def vaults_list(request: Request):
                 base = os.path.basename(key)[:-5]
                 names.append(base)
             for n in sorted(set(names)):
-                count = len(_read_vault(uid, n))
+                keys_list = _read_vault(uid, n)
+                if n == FRIENDS_VAULT_SAFE:
+                    try:
+                        filtered = [k for k in keys_list if ('/partners/' not in k and '-fromfriend' not in os.path.basename(k))]
+                    except Exception:
+                        filtered = [k for k in keys_list if '/partners/' not in k]
+                    count = len(filtered)
+                else:
+                    count = len(keys_list)
                 results.append({"name": n, "count": count})
         else:
             dir_path = os.path.join(STATIC_DIR, prefix)
@@ -300,7 +311,15 @@ async def vaults_list(request: Request):
                 for f in os.listdir(dir_path):
                     if f.endswith(".json") and f != "_meta.json":
                         name = f[:-5]
-                        count = len(_read_vault(uid, name))
+                        keys_list = _read_vault(uid, name)
+                        if name == FRIENDS_VAULT_SAFE:
+                            try:
+                                filtered = [k for k in keys_list if ('/partners/' not in k and '-fromfriend' not in os.path.basename(k))]
+                            except Exception:
+                                filtered = [k for k in keys_list if '/partners/' not in k]
+                            count = len(filtered)
+                        else:
+                            count = len(keys_list)
                         results.append({"name": name, "count": count})
     except Exception as ex:
         logger.warning(f"_list_vaults failed: {ex}")
@@ -539,6 +558,12 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         _lock_vault(uid, vault)
     try:
         keys = _read_vault(uid, vault)
+        # Hide collaborator-sent items from 'Photos sent by friends' vault
+        try:
+            if vault == FRIENDS_VAULT_SAFE:
+                keys = [k for k in keys if ('/partners/' not in k and '-fromfriend' not in os.path.basename(k))]
+        except Exception:
+            pass
         # Apply optional explicit order from meta if present
         try:
             order = meta.get("order") if isinstance(meta, dict) else None
@@ -1056,6 +1081,47 @@ async def vaults_shared_favorite(payload: FavoritePayload):
     by_photo[photo_key] = photo
     data["by_photo"] = by_photo
     _write_json_key(_favorites_key(uid, vault), data)
+
+    # Maintain sender's Favorites vault for this vault
+    try:
+        # Choose a machine name and a human display name
+        base_name = _vault_key(uid, vault)[1]
+        fav_vault_machine = f"favorites__{base_name}"
+        fav_display = f"Favorites — {vault}"
+        # Add/remove photo in favorites vault
+        current = _read_vault(uid, fav_vault_machine)
+        if favorite:
+            merged = sorted(set(current) | {photo_key})
+        else:
+            merged = [k for k in current if k != photo_key]
+        _write_vault(uid, fav_vault_machine, merged)
+        # Ensure meta has a friendly display name and mark as system vault
+        meta = _read_vault_meta(uid, fav_vault_machine) or {}
+        if meta.get("display_name") != fav_display or meta.get("system_vault") != "favorites":
+            meta["display_name"] = fav_display
+            meta["system_vault"] = "favorites"
+            _write_vault_meta(uid, fav_vault_machine, meta)
+    except Exception as ex:
+        logger.warning(f"favorites vault update failed: {ex}")
+
+    # Notify owner via email (best-effort)
+    try:
+        owner_email = (get_user_email_from_uid(uid) or "").strip()
+        if owner_email and favorite:
+            name = os.path.basename(photo_key)
+            subject = f"{client_email} favorited a photo in '{vault}'"
+            intro = f"Client <strong>{client_email}</strong> <strong>favorited</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+            html = render_email(
+                "email_basic.html",
+                title="Client favorited a photo",
+                intro=intro,
+                button_label="Open Gallery",
+                button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
+            )
+            text = f"{client_email} favorited the photo {name} in vault '{vault}'."
+            send_email_smtp(owner_email, subject, html, text)
+    except Exception:
+        pass
 
     return {"ok": True, "photo": photo_key, "favorite": favorite}
 
