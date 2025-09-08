@@ -291,6 +291,178 @@ async def api_photos(
     return resp
 
 
+@router.get("/photos/partners")
+async def api_photos_partners(
+    request: Request,
+    limit: int = 200,
+    cursor: Optional[str] = None,
+    include_original: bool = False,
+    include_invisible: bool = False,
+    compute_invisible: bool = False,
+):
+    """List only collaborator-sent gallery JPEGs stored under users/{uid}/partners/.
+    Mirrors /api/photos with friend meta support but different prefix.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    items: list[dict] = []
+    next_token: Optional[str] = None
+
+    prefix = f"users/{uid}/partners/"
+    if s3 and R2_BUCKET:
+        try:
+            client = s3.meta.client
+            params = {
+                "Bucket": R2_BUCKET,
+                "Prefix": prefix,
+                "MaxKeys": max(1, min(int(limit or 200), 1000)),
+            }
+            if cursor:
+                params["ContinuationToken"] = cursor
+            resp = client.list_objects_v2(**params)
+            for entry in resp.get("Contents", []) or []:
+                key = entry.get("Key", "")
+                if not key or key.endswith("/") or key.endswith("/_history.txt"):
+                    continue
+                name = os.path.basename(key)
+                url = (
+                    f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else
+                    client.generate_presigned_url(
+                        "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
+                    )
+                )
+                item = {
+                    "key": key,
+                    "url": url,
+                    "name": name,
+                    "size": int(entry.get("Size", 0) or 0),
+                    "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
+                }
+                if include_original:
+                    try:
+                        m = re.match(r"^(.+)-(\d+)-([a-z]+)-o([^.]+)\.jpg$", name, re.IGNORECASE)
+                        if m:
+                            base_part, stamp, _suffix, oext = m.group(1), m.group(2), m.group(3), m.group(4)
+                            date_part = "/".join(os.path.dirname(key).split("/")[-3:])
+                            original_key = f"users/{uid}/originals/{date_part}/{base_part}-{stamp}-orig.{oext}"
+                            item["original_key"] = original_key
+                            if R2_PUBLIC_BASE_URL:
+                                item["original_url"] = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{original_key}"
+                            else:
+                                item["original_url"] = client.generate_presigned_url(
+                                    "get_object", Params={"Bucket": R2_BUCKET, "Key": original_key}, ExpiresIn=60 * 60
+                                )
+                    except Exception:
+                        pass
+                if include_invisible:
+                    try:
+                        if compute_invisible:
+                            item["has_invisible"] = _has_invisible_mark(uid, key)
+                        else:
+                            ckey = _cache_key_for_invisible(uid, key)
+                            rec = read_json_key(ckey)
+                            item["has_invisible"] = bool(rec.get("ok")) if isinstance(rec, dict) else False
+                    except Exception:
+                        item["has_invisible"] = False
+                try:
+                    if "-fromfriend-" in name or "-fromfriend" in name:
+                        meta_key = f"{os.path.splitext(key)[0]}.json"
+                        meta = read_json_key(meta_key)
+                        if isinstance(meta, dict) and (meta.get("note") or meta.get("from")):
+                            item["friend_note"] = str(meta.get("note") or "")
+                            if meta.get("from"):
+                                item["friend_from"] = str(meta.get("from"))
+                            if meta.get("at"):
+                                item["friend_at"] = str(meta.get("at"))
+                except Exception:
+                    pass
+                items.append(item)
+            if resp.get("IsTruncated"):
+                next_token = resp.get("NextContinuationToken")
+        except Exception as ex:
+            logger.exception(f"Failed listing partners objects: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+    else:
+        try:
+            dir_path = os.path.join(static_dir, prefix)
+            if os.path.isdir(dir_path):
+                all_files: list[tuple[str, float, int]] = []
+                for root, _, files in os.walk(dir_path):
+                    for f in files:
+                        if f == "_history.txt":
+                            continue
+                        local_path = os.path.join(root, f)
+                        rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                        try:
+                            mtime = os.path.getmtime(local_path)
+                            size = os.path.getsize(local_path)
+                        except Exception:
+                            mtime = 0
+                            size = 0
+                        all_files.append((rel, mtime, size))
+                all_files.sort(key=lambda t: t[1], reverse=True)
+                start = int(cursor or 0) if str(cursor or "").isdigit() else 0
+                slice_files = all_files[start:start + max(1, min(int(limit or 200), 5000))]
+                for rel, mtime, size in slice_files:
+                    name = os.path.basename(rel)
+                    item = {
+                        "key": rel,
+                        "url": f"/static/{rel}",
+                        "name": name,
+                        "size": int(size),
+                        "last_modified": datetime.utcfromtimestamp(mtime).isoformat() if mtime else datetime.utcnow().isoformat(),
+                    }
+                    if include_original:
+                        try:
+                            m = re.match(r"^(.+)-(\d+)-([a-z]+)-o([^.]+)\.jpg$", name, re.IGNORECASE)
+                            if m:
+                                base_part, stamp, _suffix, oext = m.group(1), m.group(2), m.group(3), m.group(4)
+                                date_part = "/".join(os.path.dirname(rel).split("/")[-3:])
+                                original_key = f"users/{uid}/originals/{date_part}/{base_part}-{stamp}-orig.{oext}"
+                                item["original_key"] = original_key
+                                item["original_url"] = f"/static/{original_key}"
+                        except Exception:
+                            pass
+                    if include_invisible:
+                        try:
+                            if compute_invisible:
+                                item["has_invisible"] = _has_invisible_mark(uid, rel)
+                            else:
+                                ckey = _cache_key_for_invisible(uid, rel)
+                                rec = read_json_key(ckey)
+                                item["has_invisible"] = bool(rec.get("ok")) if isinstance(rec, dict) else False
+                        except Exception:
+                            item["has_invisible"] = False
+                    if "-fromfriend-" in name or "-fromfriend" in name:
+                        try:
+                            meta_key = f"{os.path.splitext(rel)[0]}.json"
+                            meta = read_json_key(meta_key)
+                            if isinstance(meta, dict) and (meta.get("note") or meta.get("from")):
+                                item["friend_note"] = str(meta.get("note") or "")
+                                if meta.get("from"):
+                                    item["friend_from"] = str(meta.get("from"))
+                                if meta.get("at"):
+                                    item["friend_at"] = str(meta.get("at"))
+                        except Exception:
+                            pass
+                    items.append(item)
+                if (start + len(slice_files)) < len(all_files):
+                    next_token = str(start + len(slice_files))
+        except Exception as ex:
+            logger.exception(f"Local listing failed: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+
+    resp = {"photos": items}
+    if next_token:
+        resp["next"] = next_token
+    return resp
+
+
 @router.post("/photos/rename")
 async def api_photos_rename(request: Request, payload: dict = Body(...)):
     """Rename a photo within the user's gallery by changing the filename only.
@@ -311,7 +483,7 @@ async def api_photos_rename(request: Request, payload: dict = Body(...)):
     if not old_key or not new_name:
         return JSONResponse({"error": "old_key and new_name are required"}, status_code=400)
 
-    allowed_roots = (f"users/{uid}/watermarked/", f"users/{uid}/external/")
+    allowed_roots = (f"users/{uid}/watermarked/", f"users/{uid}/external/", f"users/{uid}/partners/")
     if not old_key.startswith(allowed_roots):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
@@ -447,6 +619,9 @@ async def api_photos_external(
                 if not key or key.endswith("/") or key.endswith("/_history.txt"):
                     continue
                 name = os.path.basename(key)
+                if "-fromfriend" in name:
+                    # Exclude partner-sent items from external listing
+                    continue
                 url = (
                     f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else
                     client.generate_presigned_url(
@@ -486,18 +661,6 @@ async def api_photos_external(
                             item["has_invisible"] = bool(rec.get("ok")) if isinstance(rec, dict) else False
                     except Exception:
                         item["has_invisible"] = False
-                try:
-                    if "-fromfriend-" in name:
-                        meta_key = f"{os.path.splitext(key)[0]}.json"
-                        meta = read_json_key(meta_key)
-                        if isinstance(meta, dict) and (meta.get("note") or meta.get("from")):
-                            item["friend_note"] = str(meta.get("note") or "")
-                            if meta.get("from"):
-                                item["friend_from"] = str(meta.get("from"))
-                            if meta.get("at"):
-                                item["friend_at"] = str(meta.get("at"))
-                except Exception:
-                    pass
                 items.append(item)
             if resp.get("IsTruncated"):
                 next_token = resp.get("NextContinuationToken")
@@ -726,7 +889,7 @@ async def api_photos_delete(request: Request, keys: List[str] = Body(..., embed=
                     if area == 'originals' and m_orig:
                         base, stamp = m_orig.group(1), m_orig.group(2)
                         # list and add all derived variants (watermarked and external) for this base-stamp
-                        for area2 in ("watermarked", "external"):
+                        for area2 in ("watermarked", "external", "partners"):
                             prefix2 = f"users/{uid}/{area2}/{date_part}/{base}-{stamp}-"
                             if s3 and R2_BUCKET:
                                 try:
@@ -746,7 +909,7 @@ async def api_photos_delete(request: Request, keys: List[str] = Body(..., embed=
                                             rel = f"users/{uid}/{area2}/{date_part}/{f}"
                                             full.add(rel)
                                             full.add(os.path.splitext(rel)[0] + ".json")
-                    elif area in ('watermarked', 'external') and m_wm:
+                    elif area in ('watermarked', 'external', 'partners') and m_wm:
                         base, stamp = m_wm.group(1), m_wm.group(2)
                         # Try to remove matching original (unknown ext)
                         for ext in ("jpg","jpeg","png","webp","heic","tif","tiff","bin"):

@@ -361,7 +361,7 @@ async def send_to_friends(
             original_url = upload_bytes(original_key, raw, content_type=orig_ct)
 
             oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
-            key = f"users/{friend_uid}/external/{date_prefix}/{base}-{stamp}-fromfriend-o{oext_token}.jpg"
+            key = f"users/{friend_uid}/partners/{date_prefix}/{base}-{stamp}-fromfriend-o{oext_token}.jpg"
             url = upload_bytes(key, gallery_jpeg, content_type='image/jpeg')
 
             # Store meta envelope (note/annotations are already burned-in; we still keep lightweight meta for traceability)
@@ -491,7 +491,7 @@ async def send_multiple_to_friend(
 
             # Save GALLERY JPEG (possibly annotated)
             oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
-            key = f"users/{friend_uid}/external/{date_prefix}/{base}-{stamp}-fromfriend-o{oext_token}.jpg"
+            key = f"users/{friend_uid}/partners/{date_prefix}/{base}-{stamp}-fromfriend-o{oext_token}.jpg"
             url = upload_bytes(key, gallery_jpeg, content_type='image/jpeg')
 
             # Lightweight meta
@@ -632,7 +632,7 @@ async def send_existing(
                 name = os.path.splitext(base_name)[0]
                 stamp = int(_dt.utcnow().timestamp())
 
-                dest_key = f"users/{friend_uid}/external/{date_prefix}/{name}-{stamp}-fromfriend.jpg"
+                dest_key = f"users/{friend_uid}/partners/{date_prefix}/{name}-{stamp}-fromfriend.jpg"
                 dest_url = upload_bytes(dest_key, to_send, content_type='image/jpeg')
                 # Persist note metadata for recipient if provided
                 try:
