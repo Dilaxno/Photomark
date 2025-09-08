@@ -549,6 +549,20 @@ async def send_multiple_to_friend(
     return {"ok": True, "result": {"email": email, "items": items}}
 
 
+@router.get("/exists")
+async def collab_exists(request: Request, email: str):
+    """Check if a collaborator with the given email exists in Firebase Auth.
+    Requires auth to limit abuse; returns { exists: boolean }.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    e = _normalize_email(email)
+    if not e or "@" not in e:
+        return {"exists": False}
+    friend_uid = get_uid_by_email(e)
+    return {"exists": bool(friend_uid)}
+
 @router.get("/recent-recipients")
 async def recent_recipients(request: Request):
     uid = get_uid_from_request(request)
