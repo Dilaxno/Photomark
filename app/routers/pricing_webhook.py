@@ -15,6 +15,7 @@ from app.core.auth import (
     fb_auth,
 )
 from app.utils.storage import read_json_key, write_json_key
+from app.utils.emailing import render_email, send_email_smtp
 
 # Firestore client via centralized helper
 try:
