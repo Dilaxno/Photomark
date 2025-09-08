@@ -117,6 +117,96 @@ async def api_embed_refresh(request: Request):
     return {"manifest": public_url or key}
 
 
+@router.post("/embed/myuploads/refresh")
+async def api_embed_myuploads_refresh(request: Request):
+    """Regenerate My Uploads manifest for script-based embed.
+    Produces users/{uid}/embed/myuploads.json listing latest external images.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    # Build simple external manifest (urls + names)
+    items: list[dict] = []
+    prefix = f"users/{uid}/external/"
+    if s3 and R2_BUCKET:
+        try:
+            client = s3.meta.client
+            params = {"Bucket": R2_BUCKET, "Prefix": prefix, "MaxKeys": 1000}
+            resp = client.list_objects_v2(**params)
+            for entry in resp.get("Contents", []) or []:
+                key = entry.get("Key", "")
+                if not key or key.endswith("/"):
+                    continue
+                name = os.path.basename(key)
+                url = (
+                    f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else
+                    client.generate_presigned_url("get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60*60)
+                )
+                items.append({"url": url, "name": name})
+        except Exception:
+            items = []
+    else:
+        dir_path = os.path.join(static_dir, prefix)
+        if os.path.isdir(dir_path):
+            for root, _, files in os.walk(dir_path):
+                for f in files:
+                    local_path = os.path.join(root, f)
+                    rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                    items.append({"url": f"/static/{rel}", "name": f})
+
+    manifest = {"photos": items[:200]}
+    key = f"users/{uid}/embed/myuploads.json"
+    payload = json.dumps(manifest, ensure_ascii=False)
+    if s3 and R2_BUCKET:
+        bucket = s3.Bucket(R2_BUCKET)
+        bucket.put_object(Key=key, Body=payload.encode("utf-8"), ContentType="application/json", ACL="public-read")
+        public_url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else None
+    else:
+        path = os.path.join(static_dir, key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(payload)
+        public_url = f"/static/{key}"
+    return {"manifest": public_url or key}
+
+
+@router.get("/embed.myuploads.js")
+async def embed_myuploads_js():
+    js = f"""
+(function(){{
+  function render(container, data){{
+    container.innerHTML='';
+    var grid=document.createElement('div');
+    grid.style.display='grid';
+    grid.style.gridTemplateColumns='repeat(5,1fr)';
+    grid.style.gap='8px';
+    (data.photos||[]).slice(0,50).forEach(function(p){{
+      var card=document.createElement('div');
+      card.style.border='1px solid #333'; card.style.borderRadius='8px'; card.style.overflow='hidden'; card.style.background='rgba(0,0,0,0.2)';
+      var img=document.createElement('img'); img.src=p.url; img.alt=p.name; img.style.width='100%'; img.style.height='140px'; img.style.objectFit='cover';
+      var cap=document.createElement('div'); cap.textContent=p.name; cap.style.fontSize='12px'; cap.style.color='#aaa'; cap.style.padding='6px'; cap.style.whiteSpace='nowrap'; cap.style.textOverflow='ellipsis'; cap.style.overflow='hidden';
+      card.appendChild(img); card.appendChild(cap); grid.appendChild(card);
+    }});
+    container.appendChild(grid);
+  }}
+  function load(el){{
+    var uid=el.getAttribute('data-uid'); var manifest=el.getAttribute('data-manifest');
+    if(!manifest) manifest=('""" + (R2_PUBLIC_BASE_URL.rstrip('/') if R2_PUBLIC_BASE_URL else '') + """' + '/users/'+uid+'/embed/myuploads.json');
+    fetch(manifest,{{cache:'no-store'}}).then(function(r){{return r.json()}}).then(function(data){{render(el,data)}}).catch(function(){{el.innerHTML='Failed to load embed'}});
+  }}
+  if(document.currentScript){
+    var sel=document.querySelectorAll('.photomark-embed, #photomark-embed');
+    sel.forEach(function(el){{ load(el); }});
+  }
+}})();
+"""
+    return Response(content=js, media_type="application/javascript")
+
+
 @router.get("/photos")
 async def api_photos(
     request: Request,
