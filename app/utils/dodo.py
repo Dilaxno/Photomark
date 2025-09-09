@@ -76,6 +76,34 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
         new_p.setdefault("return_url", redirect_url)
         new_p.setdefault("redirect_url", redirect_url)
         updated_payloads.append(new_p)
+        # Some endpoints (e.g., /checkout) require a nested payment_details object
+        try:
+            pd: dict = {}
+            # Include common fields inside payment_details
+            for k in ("product_cart", "metadata", "redirect_url", "return_url", "cancel_url"):
+                if k in new_p and new_p[k] is not None:
+                    pd[k] = new_p[k]
+            # Pass through customer/email hints
+            if "customer" in new_p and isinstance(new_p.get("customer"), dict):
+                pd["customer"] = new_p["customer"]
+            if "email" in new_p:
+                pd["email"] = new_p["email"]
+            if "customer_email" in new_p:
+                pd["customer_email"] = new_p["customer_email"]
+            wrapper: dict = {}
+            # Preserve business/brand ids at top-level if present
+            for k in ("business_id", "brand_id"):
+                if k in new_p and new_p[k] is not None:
+                    wrapper[k] = new_p[k]
+            # Preserve reference identifiers at top-level
+            for k in ("client_reference_id", "reference_id", "external_id"):
+                if k in new_p and new_p[k] is not None:
+                    wrapper[k] = new_p[k]
+            wrapper["payment_details"] = pd
+            updated_payloads.append(wrapper)
+        except Exception:
+            # If building wrapper fails, continue with base variants only
+            pass
 
     last_error = None
     async with httpx.AsyncClient(timeout=30.0) as client:
