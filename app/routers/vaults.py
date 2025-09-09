@@ -1479,6 +1479,38 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
         if not found:
             return JSONResponse({"error": "not found"}, status_code=404)
         _write_retouch_queue(uid, items)
+        try:
+            # Notify client via email about the status change (best-effort)
+            client_email = (it.get("client_email") or "").strip()
+            if client_email:
+                photo_name = os.path.basename(it.get("key") or "")
+                vault_name = str(it.get("vault") or "")
+                st = str(it.get("status") or "open").lower()
+                status_label = "Open" if st == "open" else ("In progress" if st == "in_progress" else "Done")
+                subject = f"Retouch request update: {status_label} — {photo_name or 'photo'}"
+                intro = (
+                    f"Your retouch request for <strong>{photo_name or 'the photo'}</strong> in vault <strong>{vault_name}</strong> "
+                    f"is now <strong>{status_label}</strong>."
+                )
+                if note:
+                    intro += f"<br>Note: {note}"
+                html = render_email(
+                    "email_basic.html",
+                    title="Retouch status updated",
+                    intro=intro,
+                    button_label="Open shared vault",
+                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#share",
+                )
+                text = (
+                    f"Status for your retouch request is now {status_label}. Photo: {photo_name}. Vault: {vault_name}." +
+                    (f" Note: {note}" if note else "")
+                )
+                try:
+                    send_email_smtp(client_email, subject, html, text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return {"ok": True}
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=500)
