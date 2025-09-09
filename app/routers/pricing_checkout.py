@@ -1,8 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 import os
-import httpx
-from typing import Optional
 
 from app.core.config import logger
 from app.core.auth import (
@@ -21,8 +19,7 @@ except Exception:
 try:
     from app.routers.pricing_webhook import _normalize_plan, _allowed_plans  # type: ignore
 except Exception:
-    # Minimal fallbacks
-    def _normalize_plan(plan: Optional[str]) -> str:
+    def _normalize_plan(plan: str) -> str:
         p = (plan or "").strip().lower().replace("_", " ").replace("-", " ")
         if p.endswith(" plan"):
             p = p[:-5]
@@ -49,7 +46,6 @@ def _plan_to_product_id(plan: str) -> str:
 
 
 def _get_user_email(uid: str) -> str:
-    # Prefer Firestore document email; fallback to Firebase Auth
     try:
         db = _get_fs_client()
         if db and fb_fs:
@@ -72,8 +68,8 @@ def _get_user_email(uid: str) -> str:
 
 @router.post("/link")
 async def create_pricing_link(request: Request):
-    """Create a Dodo payment link with user_uid embedded in metadata.
-
+    """
+    Create a Dodo payment link with user_uid + plan metadata.
     Request JSON: { plan: "photographers" | "agencies", quantity?: 1 }
     Response: { url }
     """
@@ -90,188 +86,72 @@ async def create_pricing_link(request: Request):
     qty = int((body.get("quantity") if isinstance(body, dict) else 1) or 1)
     qty = 1 if qty <= 0 else qty
 
-    # Optional redirect/cancel/return URLs (with sensible defaults)
-    redirect_url = str(
-        (body.get("redirectUrl") if isinstance(body, dict) else None)
-        or (body.get("redirect_url") if isinstance(body, dict) else None)
+    redirect_url = (
+        body.get("redirectUrl")
+        or body.get("redirect_url")
         or os.getenv("PRICING_REDIRECT_URL")
         or "https://photomark.cloud/#success"
     )
-    cancel_url = str(
-        (body.get("cancelUrl") if isinstance(body, dict) else None)
-        or (body.get("cancel_url") if isinstance(body, dict) else None)
+    cancel_url = (
+        body.get("cancelUrl")
+        or body.get("cancel_url")
         or os.getenv("PRICING_CANCEL_URL")
         or "https://photomark.cloud/#pricing"
     )
-    return_url = str(
-        (body.get("returnUrl") if isinstance(body, dict) else None)
-        or (body.get("return_url") if isinstance(body, dict) else None)
+    return_url = (
+        body.get("returnUrl")
+        or body.get("return_url")
         or os.getenv("PRICING_RETURN_URL")
         or redirect_url
     )
 
     allowed = _allowed_plans()
     if plan not in allowed:
-        return JSONResponse({"error": "unsupported_plan", "allowed": sorted(list(allowed))}, status_code=400)
+        return JSONResponse(
+            {"error": "unsupported_plan", "allowed": sorted(list(allowed))},
+            status_code=400,
+        )
 
     product_id = _plan_to_product_id(plan)
     if not product_id:
-        return JSONResponse({"error": "product_id_not_configured", "plan": plan}, status_code=500)
+        return JSONResponse(
+            {"error": "product_id_not_configured", "plan": plan}, status_code=500
+        )
 
-    api_base = (os.getenv("DODO_API_BASE") or "https://api.dodopayments.com").rstrip("/")
     api_key = (os.getenv("DODO_PAYMENTS_API_KEY") or os.getenv("DODO_API_KEY") or "").strip()
     if not api_key:
         return JSONResponse({"error": "missing_api_key"}, status_code=500)
 
-    # Dodo requires business_id in creation payloads; brand_id optional
     business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
     brand_id = (os.getenv("DODO_BRAND_ID") or "").strip()
 
-    # Build base payload and alternates using common Dodo structures (business/brand optional)
-    common_top = {**({"business_id": business_id} if business_id else {}), **({"brand_id": brand_id} if brand_id else {})}
-    base_payload = {
-        **common_top,
-        "metadata": {
-            "user_uid": uid,
-            "plan": plan,
-        },
-        "product_cart": [
-            {"product_id": product_id, "quantity": qty},
-        ],
+    email = _get_user_email(uid)
+    # --- Payload ---
+    payload = {
+        "business_id": business_id or None,
+        "brand_id": brand_id or None,
+        "product_cart": [{"product_id": product_id, "quantity": qty}],
+        "metadata": {"user_uid": uid, "plan": plan},
         "redirect_url": redirect_url,
         "return_url": return_url,
         "cancel_url": cancel_url,
+        "client_reference_id": uid,
+        "reference_id": uid,
+        "external_id": uid,
     }
 
-    # Add customer email if available (helps with receipts and receipts)
-    email = _get_user_email(uid)
     if email:
-        base_payload["customer"] = {"email": email}
-        base_payload["email"] = email
-        base_payload["customer_email"] = email
+        payload["customer"] = {"email": email}
+        payload["customer_email"] = email
 
-    # Add common reference identifiers to aid webhook user resolution
-    ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
-    # Also add to base payload
-    try:
-        base_payload.update(ref_fields)
-    except Exception:
-        pass
-
-    # Prepare alternate payload shapes (start with the minimal unified schema)
-    alt_payloads = [
-        {
-            # Minimal payload recommended by unified /checkouts API
-            **ref_fields,
-            "product_cart": [{"product_id": product_id, "quantity": qty}],
-            "metadata": {"user_uid": uid, "plan": plan},
-            **({"email": email, "customer_email": email} if email else {}),
-        },
-        base_payload,
-        {
-            # Overlay checkout: items array
-            **common_top,
-            **ref_fields,
-            "metadata": base_payload["metadata"],
-            "items": [{"product_id": product_id, "quantity": qty}],
-            "redirect_url": redirect_url,
-            "cancel_url": cancel_url,
-            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
-        },
-        {
-            # Snake_case products array
-            **common_top,
-            **ref_fields,
-            "metadata": base_payload["metadata"],
-            "products": [{"product_id": product_id, "quantity": qty}],
-            "redirect_url": redirect_url,
-            "cancel_url": cancel_url,
-            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
-        },
-        {
-            # Single product id + quantity
-            **common_top,
-            **ref_fields,
-            "metadata": base_payload["metadata"],
-            "product": {"id": product_id},
-            "quantity": qty,
-            "redirect_url": redirect_url,
-            "cancel_url": cancel_url,
-            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
-        },
-        {
-            # Some APIs expect price_id instead of product_id
-            **common_top,
-            **ref_fields,
-            "metadata": base_payload["metadata"],
-            "price_id": product_id,
-            "quantity": qty,
-            "redirect_url": redirect_url,
-            "cancel_url": cancel_url,
-            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
-        },
-    ]
-
-    # Use shared Dodo helper for link creation
+    # --- Create checkout link ---
     from app.utils.dodo import create_checkout_link
 
-    link, details = await create_checkout_link(alt_payloads)
+    link, details = await create_checkout_link([payload])
     if link:
         return {"url": link, "product_id": product_id, "link_kind": "url"}
+
     logger.warning(f"[pricing.link] failed to create payment link: {details}")
-    return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
-
-
-@router.get("/link/photographers")
-async def link_photographers(request: Request):
-    # Convenience GET route
-    return await create_pricing_link(Request({
-        "type": request.scope.get("type"),
-        "http_version": request.scope.get("http_version"),
-        "method": "POST",
-        "headers": request.scope.get("headers"),
-        "path": request.scope.get("path"),
-        "raw_path": request.scope.get("raw_path"),
-        "query_string": request.scope.get("query_string"),
-        "server": request.scope.get("server"),
-        "client": request.scope.get("client"),
-        "scheme": request.scope.get("scheme"),
-        "root_path": request.scope.get("root_path"),
-        "app": request.scope.get("app"),
-        "router": request.scope.get("router"),
-        "endpoint": request.scope.get("endpoint"),
-        "route": request.scope.get("route"),
-        "state": request.scope.get("state"),
-        "asgi": request.scope.get("asgi"),
-        "extensions": request.scope.get("extensions"),
-        "user": getattr(request, "user", None),
-        "session": getattr(request, "session", None),
-        "_body": b'{"plan":"photographers"}',
-    }))
-
-
-@router.get("/link/agencies")
-async def link_agencies(request: Request):
-    return await create_pricing_link(Request({
-        "type": request.scope.get("type"),
-        "http_version": request.scope.get("http_version"),
-        "method": "POST",
-        "headers": request.scope.get("headers"),
-        "path": request.scope.get("path"),
-        "raw_path": request.scope.get("raw_path"),
-        "query_string": request.scope.get("query_string"),
-        "server": request.scope.get("server"),
-        "client": request.scope.get("client"),
-        "scheme": request.scope.get("scheme"),
-        "root_path": request.scope.get("root_path"),
-        "app": request.scope.get("app"),
-        "router": request.scope.get("router"),
-        "endpoint": request.scope.get("endpoint"),
-        "route": request.scope.get("route"),
-        "state": request.scope.get("state"),
-        "asgi": request.scope.get("asgi"),
-        "extensions": request.scope.get("extensions"),
-        "user": getattr(request, "user", None),
-        "session": getattr(request, "session", None),
-        "_body": b'{"plan":"agencies"}',
-    }))
+    return JSONResponse(
+        {"error": "link_creation_failed", "details": details}, status_code=502
+    )
