@@ -1471,12 +1471,39 @@ async def vaults_approvals(request: Request, vault: str):
 
 
 @router.get("/vaults/retouch/queue")
-async def retouch_queue(request: Request):
+async def retouch_queue(request: Request, email: Optional[str] = None, vault: Optional[str] = None, status: Optional[str] = None):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
         items = _read_retouch_queue(uid)
+        # Apply optional filters for better UX
+        try:
+            if email:
+                q = str(email or '').strip().lower()
+                if q:
+                    items = [it for it in items if q in str((it.get('client_email') or '')).lower()]
+        except Exception:
+            pass
+        try:
+            if vault:
+                raw_v = str(vault or '').strip()
+                safe_v = raw_v
+                try:
+                    # Normalize to machine vault name if photographer typed display name
+                    safe_v = _vault_key(uid, raw_v)[1]
+                except Exception:
+                    safe_v = raw_v
+                items = [it for it in items if str(it.get('vault') or '') == safe_v]
+        except Exception:
+            pass
+        try:
+            if status:
+                s = str(status or '').strip().lower()
+                if s:
+                    items = [it for it in items if str(it.get('status') or '').lower() == s]
+        except Exception:
+            pass
         # Optionally, cap to a reasonable size
         return {"queue": items}
     except Exception as ex:
