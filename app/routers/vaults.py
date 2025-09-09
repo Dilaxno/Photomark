@@ -40,6 +40,7 @@ class RetouchRequestPayload(BaseModel):
     token: str
     key: str
     comment: Optional[str] | None = None
+    annotations: Optional[dict] | None = None
 
 # Local static dir used when s3 is not configured
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
@@ -1320,6 +1321,22 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
     try:
         q = _read_retouch_queue(uid)
         rid = secrets.token_urlsafe(8)
+        # Parse annotations either from explicit payload or embedded [annotations] in comment
+        ann = None
+        try:
+            if getattr(payload, "annotations", None):
+                ann = payload.annotations
+            elif comment:
+                marker = "[annotations]"
+                idx = comment.lower().find(marker)
+                if idx >= 0:
+                    raw = (comment[idx + len(marker):] or "").strip()
+                    try:
+                        ann = json.loads(raw)
+                    except Exception:
+                        ann = None
+        except Exception:
+            ann = None
         item = {
             "id": rid,
             "uid": uid,
@@ -1332,6 +1349,8 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
             "requested_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         }
+        if ann is not None:
+            item["annotations"] = ann
         q.append(item)
         # Keep most recent first (optional)
         try:
