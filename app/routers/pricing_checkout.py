@@ -147,6 +147,8 @@ async def create_pricing_link(request: Request):
     email = _get_user_email(uid)
     if email:
         base_payload["customer"] = {"email": email}
+        base_payload["email"] = email
+        base_payload["customer_email"] = email
 
     # Add common reference identifiers to aid webhook user resolution
     ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
@@ -163,6 +165,7 @@ async def create_pricing_link(request: Request):
             **ref_fields,
             "product_cart": [{"product_id": product_id, "quantity": qty}],
             "metadata": {"user_uid": uid, "plan": plan},
+            **({"email": email, "customer_email": email} if email else {}),
         },
         base_payload,
         {
@@ -173,7 +176,7 @@ async def create_pricing_link(request: Request):
             "items": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
-            **({"customer": {"email": email}} if email else {}),
+            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
         },
         {
             # Snake_case products array
@@ -183,7 +186,7 @@ async def create_pricing_link(request: Request):
             "products": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
-            **({"customer": {"email": email}} if email else {}),
+            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
         },
         {
             # Single product id + quantity
@@ -194,7 +197,7 @@ async def create_pricing_link(request: Request):
             "quantity": qty,
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
-            **({"customer": {"email": email}} if email else {}),
+            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
         },
         {
             # Some APIs expect price_id instead of product_id
@@ -205,7 +208,7 @@ async def create_pricing_link(request: Request):
             "quantity": qty,
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
-            **({"customer": {"email": email}} if email else {}),
+            **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
         },
     ]
 
