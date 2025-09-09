@@ -1294,6 +1294,7 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
             "id": rid,
             "uid": uid,
             "vault": vault,
+            "token": token,
             "key": photo_key,
             "client_email": client_email,
             "comment": comment,
@@ -1499,7 +1500,7 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
                     title="Retouch status updated",
                     intro=intro,
                     button_label="Open shared vault",
-                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#share",
+                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + ("/#share?token=" + str(it.get("token")).strip() if str(it.get("token") or "").strip() else "/#share"),
                 )
                 text = (
                     f"Status for your retouch request is now {status_label}. Photo: {photo_name}. Vault: {vault_name}." +
