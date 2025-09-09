@@ -1117,8 +1117,9 @@ async def vaults_shared_photos(token: str):
         except Exception:
             pass
 
-    # Load approvals map to let client show statuses
-    approvals = _read_json_key(_approval_key(uid, vault)) or {}
+    # Load approvals map to let client show statuses (flatten to by_photo for frontend)
+    approvals_raw = _read_json_key(_approval_key(uid, vault)) or {}
+    approvals = approvals_raw.get("by_photo") if isinstance(approvals_raw, dict) else {}
 
     # Load license price (from vault meta)
     try:
@@ -1155,7 +1156,36 @@ async def vaults_shared_photos(token: str):
     except Exception:
         pass
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency, "share": share}
+    # Build retouch map filtered by token
+    retouch = {}
+    try:
+        q = _read_retouch_queue(uid)
+        per_photo: dict[str, dict] = {}
+        for it in q:
+            try:
+                if (it.get("token") or "") != token:
+                    continue
+                if (it.get("vault") or "") != vault:
+                    continue
+                k = it.get("key") or ""
+                if not k:
+                    continue
+                st = str(it.get("status") or "open").lower()
+                rec = per_photo.get(k)
+                if (not rec) or (str(it.get("updated_at") or "") > str(rec.get("updated_at") or "")):
+                    per_photo[k] = {
+                        "status": st,
+                        "id": it.get("id"),
+                        "updated_at": it.get("updated_at"),
+                        "note": it.get("note") or it.get("comment") or "",
+                    }
+            except Exception:
+                continue
+        retouch = {"by_photo": per_photo}
+    except Exception:
+        retouch = {}
+
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
