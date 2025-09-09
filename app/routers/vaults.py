@@ -1435,6 +1435,8 @@ async def vaults_approvals(request: Request, vault: str):
         safe_vault = _vault_key(uid, vault)[1]
         data = _read_json_key(_approval_key(uid, safe_vault)) or {}
         return {"vault": safe_vault, "approvals": data}
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
 
 
 @router.get("/vaults/retouch/queue")
@@ -1480,8 +1482,6 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
         return {"ok": True}
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=500)
-    except Exception as ex:
-        return JSONResponse({"error": str(ex)}, status_code=400)
 
 
 @router.post("/vaults/shared/checkout")
