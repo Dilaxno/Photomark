@@ -4,7 +4,6 @@ from typing import Dict, Any, Optional, Tuple
 from app.core.config import logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_API_KEY
 
 # Build standard headers list including variants used across integrations
-
 def build_headers_list() -> list[dict]:
     api_key = (DODO_API_KEY or "").strip()
     headers_list = [
@@ -67,11 +66,22 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
     endpoints = build_endpoints()
     headers_list = build_headers_list()
 
+    # Add success redirect URL to all payloads
+    redirect_url = "https://photomark.cloud"
+    updated_payloads = []
+    for p in payloads:
+        new_p = p.copy()
+        # Common naming patterns for payment providers
+        new_p.setdefault("success_url", redirect_url)
+        new_p.setdefault("return_url", redirect_url)
+        new_p.setdefault("redirect_url", redirect_url)
+        updated_payloads.append(new_p)
+
     last_error = None
     async with httpx.AsyncClient(timeout=30.0) as client:
         for url in endpoints:
             for headers in headers_list:
-                for payload in payloads:
+                for payload in updated_payloads:
                     try:
                         logger.info(f"[dodo] creating payment link via {url} with headers {list(headers.keys())}")
                         resp = await client.post(url, headers=headers, json=payload)
@@ -83,7 +93,7 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
                             link = pick_checkout_url(data)
                             if link:
                                 logger.info("[dodo] created payment link successfully")
-                                return link, None
+return link, None
                         try:
                             body_text = resp.text
                         except Exception:
