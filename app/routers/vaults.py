@@ -36,6 +36,11 @@ class FavoritePayload(BaseModel):
     key: str
     favorite: bool
 
+class RetouchRequestPayload(BaseModel):
+    token: str
+    key: str
+    comment: Optional[str] | None = None
+
 # Local static dir used when s3 is not configured
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
 
@@ -51,6 +56,30 @@ def _approval_key(uid: str, vault: str) -> str:
 def _favorites_key(uid: str, vault: str) -> str:
     safe = "".join(c for c in vault if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
     return f"users/{uid}/vaults/_favorites/{safe}.json"
+
+# Retouch queue helpers (per-user global queue)
+
+def _retouch_queue_key(uid: str) -> str:
+    return f"users/{uid}/retouch/queue.json"
+
+
+def _read_retouch_queue(uid: str) -> list[dict]:
+    data = _read_json_key(_retouch_queue_key(uid)) or []
+    try:
+        if isinstance(data, list):
+            return data
+        # Migrate old map to list if needed
+        if isinstance(data, dict) and data.get("items"):
+            items = data.get("items")
+            return items if isinstance(items, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _write_retouch_queue(uid: str, items: list[dict]):
+    # Persist as a flat list for simplicity
+    _write_json_key(_retouch_queue_key(uid), items or [])
 
 
 from app.utils.invisible_mark import detect_signature, PAYLOAD_LEN
@@ -1222,6 +1251,91 @@ async def vaults_shared_approve(payload: ApprovalPayload):
     return {"ok": True, "photo": photo_key, "by_email": by_email}
 
 
+@router.post("/vaults/shared/retouch")
+async def vaults_shared_retouch(payload: RetouchRequestPayload):
+    token = (payload.token or "").strip()
+    photo_key = (payload.key or "").strip()
+    comment = (payload.comment or "").strip()
+    if not token or not photo_key:
+        return JSONResponse({"error": "token and key required"}, status_code=400)
+
+    rec = _read_json_key(_share_key(token))
+    if not rec:
+        return JSONResponse({"error": "invalid token"}, status_code=400)
+
+    # Expiry check
+    try:
+        exp = datetime.fromisoformat(str(rec.get('expires_at', '')))
+    except Exception:
+        exp = None
+    now = datetime.utcnow()
+    if exp and now > exp:
+        return JSONResponse({"error": "expired"}, status_code=410)
+
+    uid = rec.get('uid') or ''
+    vault = rec.get('vault') or ''
+    client_email = (rec.get('email') or '').lower()
+    if not uid or not vault:
+        return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Validate photo belongs to this uid and vault
+    try:
+        keys = _read_vault(uid, vault)
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+    if photo_key not in keys:
+        return JSONResponse({"error": "photo not in vault"}, status_code=400)
+
+    # Append to queue
+    try:
+        q = _read_retouch_queue(uid)
+        rid = secrets.token_urlsafe(8)
+        item = {
+            "id": rid,
+            "uid": uid,
+            "vault": vault,
+            "key": photo_key,
+            "client_email": client_email,
+            "comment": comment,
+            "status": "open",  # open | in_progress | done
+            "requested_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        q.append(item)
+        # Keep most recent first (optional)
+        try:
+            q.sort(key=lambda x: x.get("requested_at", ""), reverse=True)
+        except Exception:
+            pass
+        _write_retouch_queue(uid, q)
+    except Exception as ex:
+        logger.warning(f"retouch queue append failed: {ex}")
+        return JSONResponse({"error": "failed to save"}, status_code=500)
+
+    # Notify owner via email (best-effort)
+    try:
+        owner_email = (get_user_email_from_uid(uid) or "").strip()
+        if owner_email:
+            name = os.path.basename(photo_key)
+            subject = f"{client_email or 'A client'} requested a retouch in '{vault}'"
+            intro = f"Client <strong>{client_email or 'unknown'}</strong> requested a <strong>retouch</strong> for photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+            if comment:
+                intro += f"<br>Details: {comment}"
+            html = render_email(
+                "email_basic.html",
+                title="Retouch request received",
+                intro=intro,
+                button_label="Open Gallery",
+                button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
+            )
+            text = f"Retouch requested for {name} in vault '{vault}'. Comment: {comment}"
+            send_email_smtp(owner_email, subject, html, text)
+    except Exception:
+        pass
+
+    return {"ok": True, "id": rid}
+
+
 @router.post("/vaults/shared/favorite")
 async def vaults_shared_favorite(payload: FavoritePayload):
     token = (payload.token or "").strip()
@@ -1321,6 +1435,51 @@ async def vaults_approvals(request: Request, vault: str):
         safe_vault = _vault_key(uid, vault)[1]
         data = _read_json_key(_approval_key(uid, safe_vault)) or {}
         return {"vault": safe_vault, "approvals": data}
+
+
+@router.get("/vaults/retouch/queue")
+async def retouch_queue(request: Request):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        items = _read_retouch_queue(uid)
+        # Optionally, cap to a reasonable size
+        return {"queue": items}
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/vaults/retouch/update")
+async def retouch_update(request: Request, payload: dict = Body(...)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    rid = str((payload or {}).get("id") or "").strip()
+    status = str((payload or {}).get("status") or "").strip().lower()
+    note = str((payload or {}).get("note") or "").strip()
+    if not rid:
+        return JSONResponse({"error": "id required"}, status_code=400)
+    if status and status not in ("open", "in_progress", "done"):
+        return JSONResponse({"error": "invalid status"}, status_code=400)
+    try:
+        items = _read_retouch_queue(uid)
+        found = False
+        for it in items:
+            if it.get("id") == rid:
+                if status:
+                    it["status"] = status
+                if note:
+                    it["note"] = note
+                it["updated_at"] = datetime.utcnow().isoformat()
+                found = True
+                break
+        if not found:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        _write_retouch_queue(uid, items)
+        return {"ok": True}
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=500)
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
