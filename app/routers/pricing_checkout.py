@@ -90,7 +90,7 @@ async def create_pricing_link(request: Request):
     qty = int((body.get("quantity") if isinstance(body, dict) else 1) or 1)
     qty = 1 if qty <= 0 else qty
 
-    # Optional redirect/cancel URLs (with sensible defaults)
+    # Optional redirect/cancel/return URLs (with sensible defaults)
     redirect_url = str(
         (body.get("redirectUrl") if isinstance(body, dict) else None)
         or (body.get("redirect_url") if isinstance(body, dict) else None)
@@ -102,6 +102,12 @@ async def create_pricing_link(request: Request):
         or (body.get("cancel_url") if isinstance(body, dict) else None)
         or os.getenv("PRICING_CANCEL_URL")
         or "https://photomark.cloud/#pricing"
+    )
+    return_url = str(
+        (body.get("returnUrl") if isinstance(body, dict) else None)
+        or (body.get("return_url") if isinstance(body, dict) else None)
+        or os.getenv("PRICING_RETURN_URL")
+        or redirect_url
     )
 
     allowed = _allowed_plans()
@@ -133,6 +139,7 @@ async def create_pricing_link(request: Request):
             {"product_id": product_id, "quantity": qty},
         ],
         "redirect_url": redirect_url,
+        "return_url": return_url,
         "cancel_url": cancel_url,
     }
 
@@ -141,10 +148,19 @@ async def create_pricing_link(request: Request):
     if email:
         base_payload["customer"] = {"email": email}
 
+    # Add common reference identifiers to aid webhook user resolution
+    ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
+    # Also add to base payload
+    try:
+        base_payload.update(ref_fields)
+    except Exception:
+        pass
+
     # Prepare alternate payload shapes (start with the minimal unified schema)
     alt_payloads = [
         {
             # Minimal payload recommended by unified /checkouts API
+            **ref_fields,
             "product_cart": [{"product_id": product_id, "quantity": qty}],
             "metadata": {"user_uid": uid, "plan": plan},
         },
@@ -152,6 +168,7 @@ async def create_pricing_link(request: Request):
         {
             # Overlay checkout: items array
             **common_top,
+            **ref_fields,
             "metadata": base_payload["metadata"],
             "items": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
@@ -161,6 +178,7 @@ async def create_pricing_link(request: Request):
         {
             # Snake_case products array
             **common_top,
+            **ref_fields,
             "metadata": base_payload["metadata"],
             "products": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
@@ -170,6 +188,7 @@ async def create_pricing_link(request: Request):
         {
             # Single product id + quantity
             **common_top,
+            **ref_fields,
             "metadata": base_payload["metadata"],
             "product": {"id": product_id},
             "quantity": qty,
@@ -180,6 +199,7 @@ async def create_pricing_link(request: Request):
         {
             # Some APIs expect price_id instead of product_id
             **common_top,
+            **ref_fields,
             "metadata": base_payload["metadata"],
             "price_id": product_id,
             "quantity": qty,
@@ -189,85 +209,14 @@ async def create_pricing_link(request: Request):
         },
     ]
 
-    # Try a range of endpoints (prefer the unified checkout sessions API first)
-    endpoints = [
-        # Official unified endpoint
-        f"{api_base}/checkouts",
-        f"{api_base}/v1/checkouts",
-        # Legacy/alternative session endpoints
-        f"{api_base}/v1/checkout/session",
-        f"{api_base}/checkout/session",
-        f"{api_base}/v1/checkout/sessions",
-        # Payment link fallbacks
-        f"{api_base}/v1/payment-links",
-        f"{api_base}/payment-links",
-        f"{api_base}/api/payment-links",
-        f"{api_base}/v1/payment_links",
-        f"{api_base}/v1/payment-links/create",
-        f"{api_base}/payment-links/create",
-        # Absolute last resort (often expects payment_details and will 422)
-        f"{api_base}/v1/checkout",
-        f"{api_base}/checkout",
-    ]
+    # Use shared Dodo helper for link creation
+    from app.utils.dodo import create_checkout_link
 
-    headers_list = [
-        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        {"X-API-KEY": api_key, "Content-Type": "application/json"},
-    ]
-    # Also include business/brand in headers for providers that expect them there
-    for h in headers_list:
-        if business_id:
-            h["Dodo-Business-Id"] = business_id
-        if brand_id:
-            h["Dodo-Brand-Id"] = brand_id
-
-    # Include environment header if provided (e.g., "test")
-    env_hdr = (os.getenv("DODO_PAYMENTS_ENVIRONMENT") or os.getenv("DODO_ENV") or "").strip().strip('"')
-    if env_hdr:
-        for h in headers_list:
-            h["Dodo-Environment"] = env_hdr
-
-    last_error = None
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        for url in endpoints:
-            for headers in headers_list:
-                for payload in alt_payloads:
-                    try:
-                        logger.info(f"[pricing.link] creating payment link via {url} with headers {list(headers.keys())}")
-                        resp = await client.post(url, headers=headers, json=payload)
-                        if resp.status_code in (200, 201):
-                            data = resp.json()
-                            # Common possible fields
-                            payment_link = (data.get("payment_link") if isinstance(data, dict) else None)
-                            checkout_url = (data.get("checkout_url") if isinstance(data, dict) else None)
-                            url_field = (data.get("url") if isinstance(data, dict) else None)
-                            link = payment_link or url_field or checkout_url
-                            if link:
-                                kind = "payment_link" if payment_link else ("checkout_url" if checkout_url else "url")
-                                logger.info("[pricing.link] created payment link successfully")
-                                return {"url": link, "product_id": product_id, "link_kind": kind}
-                            # Some APIs wrap the object
-                            obj = data.get("data") if isinstance(data, dict) else None
-                            if isinstance(obj, dict):
-                                payment_link = obj.get("payment_link")
-                                checkout_url = obj.get("checkout_url")
-                                url_field = obj.get("url")
-                                link = payment_link or url_field or checkout_url
-                                if link:
-                                    kind = "payment_link" if payment_link else ("checkout_url" if checkout_url else "url")
-                                    logger.info("[pricing.link] created payment link successfully (wrapped)")
-                                    return {"url": link, "product_id": product_id, "link_kind": kind}
-                        # Store error for diagnostics
-                        try:
-                            body_text = resp.text
-                        except Exception:
-                            body_text = ""
-                        last_error = {"status": resp.status_code, "endpoint": url, "payload_keys": list(payload.keys()), "body": body_text[:2000]}
-                    except Exception as ex:
-                        last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
-
-    logger.warning(f"[pricing.link] failed to create payment link: {last_error}")
-    return JSONResponse({"error": "link_creation_failed", "details": last_error}, status_code=502)
+    link, details = await create_checkout_link(alt_payloads)
+    if link:
+        return {"url": link, "product_id": product_id, "link_kind": "url"}
+    logger.warning(f"[pricing.link] failed to create payment link: {details}")
+    return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
 
 
 @router.get("/link/photographers")

@@ -304,6 +304,21 @@ async def pricing_webhook(request: Request):
 
     # Fallback by email if metadata is missing or empty
     if not uid:
+        # Try common reference fields present in some providers
+        try:
+            candidates = []
+            for src in (obj, payload, data):
+                if isinstance(src, dict):
+                    for k in ("client_reference_id","reference_id","external_id","order_id","user_uid","uid","userUid"):
+                        v = str((src.get(k) or "")).strip()
+                        if v:
+                            candidates.append(v)
+            if candidates:
+                uid = candidates[0]
+        except Exception:
+            pass
+
+    if not uid:
         try:
             email = _first_email_from_payload(payload) or _first_email_from_payload(obj or {})
         except Exception:
