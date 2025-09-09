@@ -93,7 +93,7 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
                             link = pick_checkout_url(data)
                             if link:
                                 logger.info("[dodo] created payment link successfully")
-return link, None
+                                return link, None
                         try:
                             body_text = resp.text
                         except Exception:
