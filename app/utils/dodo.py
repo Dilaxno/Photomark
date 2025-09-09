@@ -26,28 +26,25 @@ def build_headers_list() -> list[dict]:
 
 def build_endpoints() -> list[str]:
     base = (DODO_API_BASE or "https://api.dodopayments.com").rstrip("/")
-    path = (DODO_CHECKOUT_PATH or "/checkouts").strip()
+    path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
     if not path.startswith("/"):
         path = "/" + path
-    # Prioritize modern endpoints; exclude legacy /checkout endpoints to avoid schema 422s
-    candidates = [
+    return [
+        f"{base}{path}",
         f"{base}/checkouts",
         f"{base}/v1/checkouts",
-        f"{base}{path}",
+        f"{base}/v1/checkout/session",
+        f"{base}/checkout/session",
+        f"{base}/v1/checkout/sessions",
         f"{base}/v1/payment-links",
         f"{base}/payment-links",
         f"{base}/api/payment-links",
         f"{base}/v1/payment_links",
         f"{base}/v1/payment-links/create",
         f"{base}/payment-links/create",
+        f"{base}/v1/checkout",
+        f"{base}/checkout",
     ]
-    out: list[str] = []
-    seen = set()
-    for u in candidates:
-        if u not in seen:
-            out.append(u)
-            seen.add(u)
-    return out
 
 
 def pick_checkout_url(data: Dict[str, Any]) -> Optional[str]:
