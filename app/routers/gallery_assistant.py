@@ -46,8 +46,10 @@ async def _groq_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
         return {"reply": "Assistant is not configured.", "commands": []}
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    # Allow override via env var, default to requested llama-3.1-8b-instant
+    model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     payload = {
-        "model": "openai/gpt-oss-120b",
+        "model": model,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
