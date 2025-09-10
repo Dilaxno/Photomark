@@ -330,7 +330,7 @@ async def pricing_webhook(request: Request):
     meta = meta if isinstance(meta, dict) else {}
 
     # --- Step 6: Resolve UID ---
-    uid_keys = ("user_uid", "userUid", "uid")
+    uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
     uid = ""
     for k in uid_keys:
         v = str((meta.get(k) if isinstance(meta, dict) else "") or "").strip()
@@ -342,7 +342,17 @@ async def pricing_webhook(request: Request):
     if not uid:
         for src in (event_obj, payload):
             if isinstance(src, dict):
-                for k in ("client_reference_id", "reference_id", "external_id", "order_id", "user_uid", "uid", "userUid"):
+                for k in (
+                    "client_reference_id",
+                    "reference_id",
+                    "external_id",
+                    "order_id",
+                    "user_uid",
+                    "uid",
+                    "userUid",
+                    "userId",
+                    "user-id",
+                ):
                     v = str((src.get(k) or "")).strip()
                     if v:
                         uid = v
@@ -352,7 +362,21 @@ async def pricing_webhook(request: Request):
 
     # Fallback: provider-specific nesting (deep scan)
     if not uid and isinstance(payload, dict):
-        deep_uid = _deep_find_first(payload, ("user_uid", "userUid", "uid", "client_reference_id", "reference_id", "external_id", "order_id"))
+        deep_uid = _deep_find_first(
+            payload,
+            (
+                "user_uid",
+                "userUid",
+                "uid",
+                "userId",
+                "user-id",
+                "client_reference_id",
+                "reference_id",
+                "external_id",
+                "order_id",
+                "customer_id",
+            ),
+        )
         if deep_uid:
             uid = deep_uid
 
@@ -368,6 +392,11 @@ async def pricing_webhook(request: Request):
                 pass
 
     if not uid:
+        try:
+            sample = {k: (v if isinstance(v, (str, int)) else type(v).__name__) for k, v in list((event_obj or {}).items())[:20]}
+            logger.warning(f"[pricing.webhook] missing uid; keys hint={list(sample.keys())}")
+        except Exception:
+            pass
         logger.warning("[pricing.webhook] missing metadata.user_uid; cannot upgrade")
         return {"ok": True, "skipped": True, "reason": "missing_metadata_user_uid"}
 
