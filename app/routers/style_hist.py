@@ -8,6 +8,7 @@ import concurrent.futures as cf
 
 import numpy as np
 from PIL import Image
+from skimage import color
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
@@ -129,6 +130,75 @@ def _apply_lut_rgb(src_full: np.ndarray, lut: np.ndarray) -> np.ndarray:
   for c in range(3):
     out[..., c] = lut[c][src_full[..., c]]
   return out
+
+
+# ---------- Reinhard mean/std color transfer helpers ----------
+
+def _rgb_uint8_to_float(img_np: np.ndarray) -> np.ndarray:
+  """Convert uint8 [0,255] RGB to float [0,1]."""
+  if img_np.dtype != np.float32 and img_np.dtype != np.float64:
+    return (img_np.astype(np.float32) / 255.0).clip(0.0, 1.0)
+  return img_np
+
+
+def _lab_stats(lab: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+  """Return mean and std across H,W for Lab image with shape [H,W,3]."""
+  mean = lab.mean(axis=(0, 1))
+  std = lab.std(axis=(0, 1))
+  # Guard against zero std to avoid division by zero
+  std = np.where(std < 1e-6, 1.0, std)
+  return mean, std
+
+
+def _reinhard_apply(target_lab: np.ndarray, tgt_mean: np.ndarray, tgt_std: np.ndarray, src_mean: np.ndarray, src_std: np.ndarray) -> np.ndarray:
+  """Apply Reinhard transfer in Lab space to target_lab given stats."""
+  out = (target_lab - tgt_mean) / tgt_std * src_std + src_mean
+  # Clip to reasonable Lab ranges: L[0,100], a/b approximately [-127,127]
+  out[..., 0] = np.clip(out[..., 0], 0.0, 100.0)
+  out[..., 1:] = np.clip(out[..., 1:], -127.0, 127.0)
+  return out
+
+
+def _process_blob_reinhard(
+  blob: bytes,
+  filename: str,
+  ref_mean: np.ndarray,
+  ref_std: np.ndarray,
+  fmt: str,
+  quality: float,
+) -> Tuple[str, bytes]:
+  """Worker for Reinhard transfer: compute target stats on downscaled target, apply to full-res in Lab."""
+  # Load full target
+  tgt_img_full = Image.open(io.BytesIO(blob)).convert('RGB')
+  tgt_full_np_u8 = _pil_to_np_rgb(tgt_img_full)
+  tgt_full_np = _rgb_uint8_to_float(tgt_full_np_u8)
+  # Downscale for stats
+  tgt_small = _downscale(tgt_img_full, 512)
+  tgt_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(tgt_small))
+
+  # Convert to Lab
+  tgt_small_lab = color.rgb2lab(tgt_small_np)
+  tgt_mean, tgt_std = _lab_stats(tgt_small_lab)
+
+  tgt_full_lab = color.rgb2lab(tgt_full_np)
+  out_lab = _reinhard_apply(tgt_full_lab, tgt_mean, tgt_std, ref_mean, ref_std)
+  out_rgb = color.lab2rgb(out_lab)
+  out_u8 = np.clip(np.rint(out_rgb * 255.0), 0, 255).astype(np.uint8)
+  out_img = _np_to_pil(out_u8)
+
+  buf = io.BytesIO()
+  out_fmt = (fmt or 'jpg').lower()
+  if out_fmt in ('jpg', 'jpeg'):
+    q = int(max(1, min(100, round((quality or 0.92) * 100))))
+    out_img.save(buf, format='JPEG', quality=q, subsampling=0, progressive=True, optimize=True)
+    ext = 'jpg'
+  else:
+    out_img.save(buf, format='PNG')
+    ext = 'png'
+  buf.seek(0)
+  base = os.path.splitext(filename or 'image')[0]
+  name = f"{base}_styled.{ext}"
+  return name, buf.getvalue()
 
 
 def _process_blob(
@@ -290,4 +360,112 @@ async def hist_match(
 
   except Exception as ex:
     logger.exception(f"Histogram matching failed: {ex}")
+    return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post('/reinhard')
+async def reinhard_match(
+  request: Request,
+  reference: UploadFile = File(..., description='Reference image to copy style from'),
+  files: List[UploadFile] = File(..., description='Target images to apply reference style to'),
+  fmt: Optional[str] = Form('jpg'),
+  quality: Optional[float] = Form(0.92),
+):
+  """
+  Copy the color style using Reinhard mean/std transfer in Lab space.
+  - Compute reference Lab mean/std on downscaled reference.
+  - For each target, compute target Lab mean/std on downscaled target.
+  - Apply transfer to full-res target in Lab and encode.
+  """
+  # Auth
+  eff_uid, req_uid = resolve_workspace_uid(request)
+  if not eff_uid or not req_uid:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  if not has_role_access(req_uid, eff_uid, 'convert'):
+    return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+  # One-free-generation enforcement
+  billing_uid = eff_uid or _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'style_transfer'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
+
+  try:
+    # Read reference
+    ref_bytes = await reference.read()
+    if not ref_bytes:
+      return JSONResponse({"error": "empty reference"}, status_code=400)
+    ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
+    ref_small = _downscale(ref_img_full, 512)
+    ref_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(ref_small))
+    ref_lab = color.rgb2lab(ref_small_np)
+    ref_mean, ref_std = _lab_stats(ref_lab)
+
+    # Collect target bytes
+    inputs: List[Tuple[int, str, bytes]] = []
+    idx = 0
+    for f in files:
+      data = await f.read()
+      if not data:
+        idx += 1
+        continue
+      inputs.append((idx, f.filename or f"image_{idx}.jpg", data))
+      idx += 1
+
+    if not inputs:
+      return JSONResponse({"error": "No images processed"}, status_code=400)
+
+    # Workers
+    cpu = os.cpu_count() or 2
+    max_workers = min(max(1, cpu), max(1, len(inputs)))
+
+    results: List[Tuple[int, str, bytes]] = []
+
+    if len(inputs) == 1 or max_workers == 1:
+      for i, name, blob in inputs:
+        out_name, out_bytes = _process_blob_reinhard(blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92))
+        results.append((i, out_name, out_bytes))
+    else:
+      with cf.ProcessPoolExecutor(max_workers=max_workers) as ex:
+        futures = []
+        for i, name, blob in inputs:
+          futures.append((i, name, ex.submit(_process_blob_reinhard, blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92))))
+        for i, name, fut in futures:
+          try:
+            out_name, out_bytes = fut.result()
+            results.append((i, out_name, out_bytes))
+          except Exception as exn:
+            logger.exception(f"Processing failed for {name}: {exn}")
+            continue
+
+    if not results:
+      return JSONResponse({"error": "No images processed"}, status_code=400)
+
+    results.sort(key=lambda t: t[0])
+
+    if len(results) == 1:
+      _, name, data = results[0]
+      media = 'image/jpeg' if name.lower().endswith('.jpg') or name.lower().endswith('.jpeg') else 'image/png'
+      headers = {
+        "Content-Disposition": f"attachment; filename={name}",
+        "Access-Control-Expose-Headers": "Content-Disposition",
+      }
+      return StreamingResponse(io.BytesIO(data), media_type=media, headers=headers)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+      for _, name, data in results:
+        zf.writestr(name, data)
+    zip_buf.seek(0)
+    headers = {
+      "Content-Disposition": "attachment; filename=styled_batch.zip",
+      "Access-Control-Expose-Headers": "Content-Disposition",
+    }
+    return StreamingResponse(zip_buf, media_type='application/zip', headers=headers)
+
+  except Exception as ex:
+    logger.exception(f"Reinhard matching failed: {ex}")
     return JSONResponse({"error": str(ex)}, status_code=500)
