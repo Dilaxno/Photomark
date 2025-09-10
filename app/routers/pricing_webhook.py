@@ -380,6 +380,35 @@ async def pricing_webhook(request: Request):
         event_obj = payload
     event_obj = event_obj if isinstance(event_obj, dict) else {}
 
+    # --- Diagnostics: summarize payload structure to debug missing products ---
+    try:
+        def _summarize_list(lst):
+            if not isinstance(lst, list):
+                return {"type": type(lst).__name__}
+            head = lst[0] if lst else None
+            head_keys = list(head.keys())[:10] if isinstance(head, dict) else type(head).__name__
+            return {"len": len(lst), "first_type": type(head).__name__ if head is not None else None, "first_keys": head_keys}
+
+        top_keys = list(payload.keys())[:30]
+        obj_keys = list(event_obj.keys())[:30]
+        pc = event_obj.get("product_cart")
+        items = event_obj.get("items")
+        products = event_obj.get("products")
+        lines = event_obj.get("lines")
+        line_items = event_obj.get("line_items")
+        logger.info(
+            "[pricing.webhook] diag: top_keys=%s obj_keys=%s pc=%s items=%s products=%s lines=%s line_items=%s",
+            top_keys,
+            obj_keys,
+            _summarize_list(pc),
+            _summarize_list(items),
+            _summarize_list(products),
+            _summarize_list(lines if isinstance(lines, list) else (lines.get('data') if isinstance(lines, dict) else [])),
+            _summarize_list(line_items),
+        )
+    except Exception:
+        pass
+
     # --- Step 5: Extract metadata ---
     meta = event_obj.get("metadata") if isinstance(event_obj, dict) else {}
     meta = meta if isinstance(meta, dict) else {}
