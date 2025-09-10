@@ -812,16 +812,23 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
     link = f"{front}/#share?token={token}"
 
-    subject = "You have access to a photo vault"
+    # Compute photo count and pluralize noun
+    count = len(keys)
+    noun = "photo" if count == 1 else "photos"
+
+    subject = f"You have access to {count} {noun}"
     html = render_email(
         "email_basic.html",
         title="You've been granted access",
-        intro=f"You have been granted one-time access to a photo vault.<br>This link expires on: <strong>{expires_at_iso}</strong>",
+        intro=(
+            f"You have been granted one-time access to {count} {noun} in a photo vault."
+            f"<br>This link expires on: <strong>{expires_at_iso}</strong>"
+        ),
         button_label="Open vault",
         button_url=link,
         footer_note="If you did not expect this email, you can ignore it.",
     )
-    text = f"Open this link to view the shared vault (expires {expires_at_iso}): {link}"
+    text = f"Open this link to view the shared vault with {count} {noun} (expires {expires_at_iso}): {link}"
 
     sent = send_email_smtp(email, subject, html, text)
     if not sent:
