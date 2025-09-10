@@ -215,6 +215,37 @@ def _plan_from_products(obj: dict) -> str:
                 found_phot = True
             if name:
                 names.append(name)
+
+        # Fallback: bounded deep scan for id-like fields if nothing found so far
+        if not (found_ag or found_phot):
+            seen_ids: set[str] = set()
+            def _scan_ids(node: dict, depth: int = 0):
+                if depth > 4 or not isinstance(node, dict):
+                    return
+                # Common id fields
+                for k in ("product_id", "productId", "price_id", "priceId", "id"):
+                    v = node.get(k)
+                    if isinstance(v, str) and v.strip():
+                        seen_ids.add(v.strip())
+                # Nested objects commonly used
+                for k in ("product", "price", "data", "object", "item", "attributes"):
+                    v = node.get(k)
+                    if isinstance(v, dict):
+                        _scan_ids(v, depth + 1)
+                    elif isinstance(v, list):
+                        for it in v[:50]:
+                            if isinstance(it, dict):
+                                _scan_ids(it, depth + 1)
+            _scan_ids(obj)
+            if pid_ag and pid_ag in seen_ids:
+                found_ag = True
+            if pid_phot and pid_phot in seen_ids:
+                found_phot = True
+
+        try:
+            logger.info(f"[pricing.webhook] product mapping: found_agencies={found_ag} found_photographers={found_phot} names={names}")
+        except Exception:
+            pass
     except Exception:
         pass
 
