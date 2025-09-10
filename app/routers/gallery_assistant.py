@@ -47,7 +47,7 @@ async def _groq_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-120b",
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
