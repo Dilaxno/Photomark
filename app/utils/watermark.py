@@ -1,21 +1,7 @@
 from typing import Optional, Tuple
 import os
-import hashlib
-import tempfile
-from urllib.parse import urlparse
-from urllib.request import urlretrieve
-import numpy as np
-import cv2
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from app.core.config import logger
-
-try:
-    # FreeType support is provided by opencv-contrib builds
-    import cv2.freetype as cv2_freetype  # type: ignore
-    HAS_FT = True
-except Exception:
-    cv2_freetype = None  # type: ignore
-    HAS_FT = False
 
 
 def _compute_position(img_w: int, img_h: int, box_w: int, box_h: int, padding: int, pos: str) -> Tuple[int, int]:
@@ -47,122 +33,6 @@ def _parse_hex_color(s: str) -> Tuple[int, int, int]:
         return (255, 255, 255)
 
 
-def _font_candidates() -> list[str | None]:
-    return [
-        os.getenv("WATERMARK_TTF"),
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "arial.ttf",
-    ]
-
-
-_FONT_CACHE_DIR: Optional[str] = None
-
-
-def _resolve_ttf() -> Optional[str]:
-    # Allow specifying a URL in env; download and cache it once
-    env_ttf = os.getenv("WATERMARK_TTF")
-    if env_ttf and env_ttf.strip().lower().startswith(("http://", "https://")):
-        try:
-            parsed = urlparse(env_ttf)
-            # determine extension from URL path
-            _, ext = os.path.splitext(parsed.path)
-            if not ext:
-                ext = ".ttf"
-            cache_dir = os.getenv("WATERMARK_FONT_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "photomark_fonts")
-            os.makedirs(cache_dir, exist_ok=True)
-            h = hashlib.sha256(env_ttf.encode("utf-8")).hexdigest()[:16]
-            dest = os.path.join(cache_dir, f"{h}{ext}")
-            if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-                urlretrieve(env_ttf, dest)
-            if os.path.exists(dest) and os.path.getsize(dest) > 0:
-                global _FONT_CACHE_DIR
-                _FONT_CACHE_DIR = cache_dir
-                return dest
-        except Exception as e:
-            logger.warning("Failed to cache font from URL; will try local font candidates. Error: %s", e)
-
-    for fp in _font_candidates():
-        if not fp:
-            continue
-        if os.path.exists(fp):
-            return fp
-    # last resort: try DejaVuSans from path resolution
-    try:
-        import matplotlib
-        dv = os.path.join(os.path.dirname(matplotlib.__file__), 'mpl-data', 'fonts', 'ttf', 'DejaVuSans.ttf')
-        if os.path.exists(dv):
-            return dv
-    except Exception:
-        pass
-    return None
-
-
-# Cache the resolved TTF and track one-time warnings to avoid log spam
-TTF_PATH: Optional[str] = _resolve_ttf()
-_WARNED_PIL_FALLBACK = False
-_WARNED_NO_TTF = False
-_LOGGED_FONT_HEALTH = False
-
-
-def _log_font_health_once() -> None:
-    global _LOGGED_FONT_HEALTH
-    if _LOGGED_FONT_HEALTH:
-        return
-    env_val = os.getenv("WATERMARK_TTF")
-    env_set = bool(env_val)
-    cache_dir = _FONT_CACHE_DIR or "-"
-    logger.info(
-        "Watermark text renderer: freetype=%s, font_resolved=%s, env_set=%s, cache_dir=%s",
-        "yes" if HAS_FT else "no",
-        TTF_PATH or "None",
-        env_set,
-        cache_dir,
-    )
-    _LOGGED_FONT_HEALTH = True
-
-
-# Log on module import
-_log_font_health_once()
-
-
-def _pil_to_bgra(img: Image.Image) -> np.ndarray:
-    if img.mode != 'RGBA':
-        img = img.convert('RGBA')
-    arr = np.array(img)  # RGBA
-    b,g,r,a = cv2.split(arr)
-    return cv2.merge([b,g,r,a])
-
-
-def _bgra_to_pil(arr: np.ndarray) -> Image.Image:
-    b,g,r,a = cv2.split(arr)
-    rgba = cv2.merge([r,g,b,a])
-    return Image.fromarray(rgba, mode='RGBA').convert('RGB')
-
-
-def _draw_text_ft(canvas_bgra: np.ndarray, text: str, org: Tuple[int,int], ttf_path: str, font_px: int, color_bgr: Tuple[int,int,int], alpha: float = 0.96, stroke: int = 0) -> Tuple[int,int]:
-    """Draw text using FreeType on a BGRA canvas; returns text size (w,h)."""
-    if not HAS_FT:
-        raise RuntimeError('cv2.freetype not available')
-    ft = cv2_freetype.createFreeType2()  # type: ignore[attr-defined]
-    ft.loadFontData(fontFileName=ttf_path, id=0)
-    # Measure
-    (w, h), baseline = ft.getTextSize(text, fontHeight=font_px, thickness=stroke)  # type: ignore
-    x, y = org
-    # Shadow
-    sh = max(1, font_px // 10)
-    shadow_col = (0,0,0)
-    ft.putText(canvas_bgra, text, (x + sh, y + sh + h), fontHeight=font_px, color=shadow_col + (int(min(200, alpha*255)),), thickness=stroke, line_type=cv2.LINE_AA, bottomLeftOrigin=False)  # type: ignore
-    # Main text
-    b,g,r = color_bgr
-    ft.putText(canvas_bgra, text, (x, y + h), fontHeight=font_px, color=(b,g,r,int(alpha*255)), thickness=stroke, line_type=cv2.LINE_AA, bottomLeftOrigin=False)  # type: ignore
-    return (w, h)
-
-
 def add_text_watermark(
     img: Image.Image,
     text: str,
@@ -171,58 +41,50 @@ def add_text_watermark(
     opacity: Optional[float] = None,
     bg_box: bool = False,
 ) -> Image.Image:
-    """Add watermark text with OpenCV+FreeType (fallback to PIL if unavailable)."""
-    width, height = img.size
-    base_size = max(18, int(min(width, height) * 0.05))
-    padding = max(10, base_size // 2)
-    r, g, b = _parse_hex_color(color or '#ffffff')
-    a = float(max(0.0, min(1.0, opacity if opacity is not None else 0.96)))
+    """Add watermark text at a chosen position; scales with image size.
+    color: hex like #RRGGBB; opacity: 0..1; bg_box draws a semi-transparent rounded rectangle behind.
+    """
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
 
-    global _WARNED_PIL_FALLBACK, TTF_PATH
-    ttf = TTF_PATH
-    if not HAS_FT or not ttf:
-        if not _WARNED_PIL_FALLBACK:
-            logger.warning("cv2.freetype or TTF not available; falling back to PIL for text watermark")
-            _WARNED_PIL_FALLBACK = True
-        # Fallback to PIL rendering by delegating to previous algorithm via simple path
-        from PIL import ImageDraw, ImageFont  # local import to reduce global PIL use
-        im_rgba = img.convert('RGBA')
-        overlay = Image.new('RGBA', im_rgba.size, (255,255,255,0))
-        draw = ImageDraw.Draw(overlay)
+    width, height = img.size
+    overlay = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # Font size relative to min dimension
+    base_size = max(18, int(min(width, height) * 0.05))
+    font = None
+    # Try common fonts in order for consistent sizing across envs
+    font_candidates = [
+        os.getenv("WATERMARK_TTF"),                  # explicit override
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
+        "/System/Library/Fonts/Supplemental/Arial.ttf",      # macOS system Arial
+        "C:/Windows/Fonts/arial.ttf",                         # Windows Arial
+        "arial.ttf",                                          # current dir fallback
+    ]
+    for fp in font_candidates:
+        if not fp:
+            continue
         try:
-            font = ImageFont.truetype(ttf or 'DejaVuSans.ttf', base_size)
+            font = ImageFont.truetype(fp, base_size)
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", base_size)
         except Exception:
             font = ImageFont.load_default()
-        tw, th = draw.textbbox((0,0), text, font=font)[2:4]
-        x, y = _compute_position(width, height, tw, th, padding, position)
-        if bg_box:
-            pad_x = max(6, int(base_size * 0.4))
-            pad_y = max(4, int(base_size * 0.25))
-            bx0 = max(0, x - pad_x)
-            by0 = max(0, y - int(pad_y * 0.6))
-            bx1 = min(width, x + tw + pad_x)
-            by1 = min(height, y + th + pad_y)
-            try:
-                draw.rounded_rectangle([bx0, by0, bx1, by1], radius=int(min(bx1-bx0, by1-by0) * 0.12), fill=(0,0,0,int(0.32*255)))
-            except Exception:
-                draw.rectangle([bx0, by0, bx1, by1], fill=(0,0,0,int(0.32*255)))
-        shadow_offset = max(1, base_size // 10)
-        draw.text((x+shadow_offset, y+shadow_offset), text, font=font, fill=(0,0,0,int(min(200, a*255))))
-        stroke_w = max(1, base_size // 14)
-        draw.text((x,y), text, font=font, fill=(r,g,b,int(a*255)), stroke_width=stroke_w, stroke_fill=(0,0,0,int(min(220, a*255))))
-        out = Image.alpha_composite(im_rgba, overlay)
-        return out.convert('RGB')
+            logger.warning("Falling back to PIL default bitmap font; watermark text may appear small. Provide WATERMARK_TTF or install DejaVuSans/Arial.")
 
-    # OpenCV path
-    base = _pil_to_bgra(img)
-    h, w = base.shape[:2]
-    alpha_layer = base[:, :, 3]
-    overlay = np.zeros_like(base)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-    # Estimate text size by drawing off-screen
-    tmp = np.zeros_like(base)
-    tw, th = _draw_text_ft(tmp, text, (0,0), ttf, base_size, (b,g,r), alpha=a, stroke=max(1, base_size//14))
-    x, y = _compute_position(w, h, tw, th, padding, position)
+    padding = max(10, base_size // 2)
+    x, y = _compute_position(width, height, tw, th, padding, position)
+
+    r, g, b = _parse_hex_color(color or '#ffffff')
+    a = int(max(0.0, min(1.0, opacity if opacity is not None else 0.96)) * 255)
 
     # Optional background box
     if bg_box:
@@ -230,68 +92,74 @@ def add_text_watermark(
         pad_y = max(4, int(base_size * 0.25))
         bx0 = max(0, x - pad_x)
         by0 = max(0, y - int(pad_y * 0.6))
-        bx1 = min(w, x + tw + pad_x)
-        by1 = min(h, y + th + pad_y)
-        box = overlay[by0:by1, bx0:bx1]
-        if box.size:
-            # semi-transparent black with rounded corners approximation
-            cv2.rectangle(box, (0,0), (bx1-bx0-1, by1-by0-1), (0,0,0,int(0.32*255)), thickness=-1)
+        bx1 = min(width, x + tw + pad_x)
+        by1 = min(height, y + th + pad_y)
+        box_alpha = int(0.32 * 255)
+        try:
+            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=int(min(bx1-bx0, by1-by0) * 0.12), fill=(0, 0, 0, box_alpha))
+        except Exception:
+            draw.rectangle([bx0, by0, bx1, by1], fill=(0, 0, 0, box_alpha))
 
-    # Draw text (includes shadow and main)
-    _draw_text_ft(overlay, text, (x, y), ttf, base_size, (b,g,r), alpha=a, stroke=max(1, base_size//14))
+    # Shadow
+    shadow_offset = max(1, base_size // 10)
+    draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, min(200, a)))
 
-    # Alpha composite
-    out = base.copy()
-    # Pre-multiplied alpha blending
-    ov_a = overlay[:,:,3:4].astype(np.float32)/255.0
-    bg_a = out[:,:,3:4].astype(np.float32)/255.0
-    out[:,:,:3] = (overlay[:,:,:3].astype(np.float32)*ov_a + out[:,:,:3].astype(np.float32)*(1-ov_a)).astype(np.uint8)
-    out[:,:,3] = np.clip((ov_a + bg_a*(1-ov_a))*255.0, 0, 255).astype(np.uint8).squeeze()
-    return _bgra_to_pil(out)
+    # Main text with stroke
+    stroke_w = max(1, base_size // 14)
+    draw.text((x, y), text, font=font, fill=(r, g, b, a), stroke_width=stroke_w, stroke_fill=(0, 0, 0, min(220, a)))
+
+    watermarked = Image.alpha_composite(img, overlay)
+    return watermarked.convert("RGB")
 
 
 def add_signature_watermark(img: Image.Image, signature_rgba: Image.Image, position: str = 'bottom-right', bg_box: bool = False) -> Image.Image:
-    """Overlay signature PNG using OpenCV alpha blending; scales to ~30% width."""
-    base = _pil_to_bgra(img)
-    sig = signature_rgba.convert('RGBA')
-    sig_bgra = _pil_to_bgra(sig)
-    h, w = base.shape[:2]
-    target_w = max(64, int(w * 0.30))
-    scale = target_w / sig_bgra.shape[1]
-    target_h = int(sig_bgra.shape[0] * scale)
-    sig_resized = cv2.resize(sig_bgra, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
-    padding = max(10, int(min(w, h) * 0.02))
-    x, y = _compute_position(w, h, sig_resized.shape[1], sig_resized.shape[0], padding, position)
+    """Overlay a signature PNG with alpha at a chosen position; scales to ~30% of width.
+    bg_box draws a semi-transparent rounded rectangle behind the logo to increase robustness.
+    """
+    if img.mode != "RGBA":
+        base = img.convert("RGBA")
+    else:
+        base = img.copy()
 
+    width, height = base.size
+
+    sig = signature_rgba.convert("RGBA")
+
+    target_w = max(64, int(width * 0.30))
+    scale = target_w / sig.width
+    target_h = int(sig.height * scale)
+    sig_resized = sig.resize((target_w, target_h), Image.LANCZOS)
+
+    padding = max(10, int(min(width, height) * 0.02))
+    x, y = _compute_position(width, height, sig_resized.width, sig_resized.height, padding, position)
+
+    # Optional background box behind the logo
     if bg_box:
-        pad = max(6, int(min(w, h) * 0.01))
-        bx0 = max(0, x - pad); by0 = max(0, y - pad)
-        bx1 = min(w, x + sig_resized.shape[1] + pad); by1 = min(h, y + sig_resized.shape[0] + pad)
-        cv2.rectangle(base, (bx0, by0), (bx1, by1), (0,0,0,int(0.35*255)), thickness=-1)
+        pad = max(6, int(min(width, height) * 0.01))
+        bx0 = max(0, x - pad)
+        by0 = max(0, y - pad)
+        bx1 = min(width, x + sig_resized.width + pad)
+        by1 = min(height, y + sig_resized.height + pad)
+        box_alpha = int(0.35 * 255)
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        try:
+            odraw.rounded_rectangle([bx0, by0, bx1, by1], radius=int(min(bx1-bx0, by1-by0) * 0.08), fill=(0, 0, 0, box_alpha))
+        except Exception:
+            odraw.rectangle([bx0, by0, bx1, by1], fill=(0, 0, 0, box_alpha))
+        base = Image.alpha_composite(base, overlay)
 
-    # Shadow
+    # Shadow/glow
     try:
-        shadow = sig_resized.copy()
-        shadow[:,:,:3] = 0
-        shadow[:,:,3] = (shadow[:,:,3].astype(np.float32) * (140.0/255.0)).astype(np.uint8)
-        sx, sy = x+2, y+2
-        roi = base[sy:sy+shadow.shape[0], sx:sx+shadow.shape[1]]
-        if roi.shape[:2] == shadow.shape[:2]:
-            a = (shadow[:,:,3:4].astype(np.float32)/255.0)
-            roi[:,:,:3] = (shadow[:,:,:3].astype(np.float32)*a + roi[:,:,:3].astype(np.float32)*(1-a)).astype(np.uint8)
-            roi[:,:,3] = np.clip((a + roi[:,:,3:4].astype(np.float32)/255.0*(1-a))*255.0, 0, 255).astype(np.uint8).squeeze()
-            base[sy:sy+shadow.shape[0], sx:sx+shadow.shape[1]] = roi
+        alpha = sig_resized.split()[3]
+        shadow = Image.new("RGBA", sig_resized.size, (0, 0, 0, 140))
+        shadow.putalpha(alpha)
+        base.alpha_composite(shadow, (x + 2, y + 2))
     except Exception:
         pass
 
-    # Blend logo
-    roi = base[y:y+sig_resized.shape[0], x:x+sig_resized.shape[1]]
-    if roi.shape[:2] == sig_resized.shape[:2]:
-        a = (sig_resized[:,:,3:4].astype(np.float32)/255.0)
-        roi[:,:,:3] = (sig_resized[:,:,:3].astype(np.float32)*a + roi[:,:,:3].astype(np.float32)*(1-a)).astype(np.uint8)
-        roi[:,:,3] = np.clip((a + roi[:,:,3:4].astype(np.float32)/255.0*(1-a))*255.0, 0, 255).astype(np.uint8).squeeze()
-        base[y:y+sig_resized.shape[0], x:x+sig_resized.shape[1]] = roi
-    return _bgra_to_pil(base)
+    base.alpha_composite(sig_resized, (x, y))
+    return base.convert("RGB")
 
 
 def add_text_watermark_tiled(
@@ -303,66 +171,87 @@ def add_text_watermark_tiled(
     spacing_rel: float = 0.3,
     scale_mul: float = 1.0,
 ) -> Image.Image:
-    """Tile watermark text with OpenCV+FreeType; rotation via cv2.warpAffine."""
-    if not HAS_FT:
-        global _WARNED_PIL_FALLBACK
-        if not _WARNED_PIL_FALLBACK:
-            logger.warning("cv2.freetype not available; falling back to single watermark via PIL path")
-            _WARNED_PIL_FALLBACK = True
-        return add_text_watermark(img, text, position='center', color=color, opacity=opacity, bg_box=False)
+    """Tile watermark text across the whole image with rotation.
+    spacing_rel: 0.05..1 relative to unit box; scale_mul: 0.5..2 multiplier of base size.
+    """
+    if img.mode != "RGBA":
+        base = img.convert("RGBA")
+    else:
+        base = img.copy()
 
-    global TTF_PATH, _WARNED_NO_TTF
-    ttf = TTF_PATH
-    if not ttf:
-        if not _WARNED_NO_TTF:
-            logger.warning("TTF font not found; falling back to single watermark")
-            _WARNED_NO_TTF = True
-        return add_text_watermark(img, text, position='center', color=color, opacity=opacity, bg_box=False)
+    width, height = base.size
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-    base = _pil_to_bgra(img)
-    h, w = base.shape[:2]
-    base_size = max(18, int(min(w, h) * 0.05))
+    base_size = max(18, int(min(width, height) * 0.05))
     size = int(base_size * max(0.5, min(2.0, scale_mul or 1.0)))
-    r, g, b = _parse_hex_color(color or '#ffffff')
-    a = float(max(0.0, min(1.0, opacity if opacity is not None else 0.96)))
 
-    # Render unit tile on its own BGRA canvas
-    tmp = np.zeros((1,1,4), dtype=np.uint8)
-    unit_dummy = np.zeros((size*3, size*10, 4), dtype=np.uint8)
-    tw, th = _draw_text_ft(unit_dummy, text, (0,0), ttf, size, (b,g,r), alpha=a, stroke=max(1,size//14))
+    font = None
+    font_candidates = [
+        os.getenv("WATERMARK_TTF"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "arial.ttf",
+    ]
+    for fp in font_candidates:
+        if not fp:
+            continue
+        try:
+            font = ImageFont.truetype(fp, size)
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", size)
+        except Exception:
+            font = ImageFont.load_default()
+
+    # Render a unit tile: shadow, stroke, fill
+    tmp = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    tdraw = ImageDraw.Draw(tmp)
+    bbox = tdraw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     bx = max(1, size // 10)
     by = max(1, size // 10)
     unit_w = tw + max(2, size // 5)
     unit_h = th + max(2, size // 5)
-    unit = np.zeros((unit_h, unit_w, 4), dtype=np.uint8)
-    _draw_text_ft(unit, text, (bx, by), ttf, size, (b,g,r), alpha=a, stroke=max(1,size//14))
+    unit = Image.new("RGBA", (unit_w, unit_h), (0, 0, 0, 0))
+    udraw = ImageDraw.Draw(unit)
+
+    r, g, b = _parse_hex_color(color or '#ffffff')
+    a = int(max(0.0, min(1.0, opacity if opacity is not None else 0.96)) * 255)
+
+    # Shadow
+    udraw.text((bx + max(1, size // 10), by + max(1, size // 10)), text, font=font, fill=(0, 0, 0, min(200, a)))
+    # Stroke and fill
+    stroke_w = max(1, size // 14)
+    udraw.text((bx, by), text, font=font, fill=(r, g, b, a), stroke_width=stroke_w, stroke_fill=(0, 0, 0, min(220, a)))
 
     gap = max(8, int(min(unit_w, unit_h) * max(0.05, min(1.0, spacing_rel or 0.3))))
     step_x = unit_w + gap
     step_y = unit_h + gap
 
-    big = np.zeros((h*3, w*3, 4), dtype=np.uint8)
-    for y0 in range(0, big.shape[0], step_y):
-        for x0 in range(0, big.shape[1], step_x):
-            uy, ux = unit.shape[0], unit.shape[1]
-            if y0+uy <= big.shape[0] and x0+ux <= big.shape[1]:
-                roi = big[y0:y0+uy, x0:x0+ux]
-                a_u = (unit[:,:,3:4].astype(np.float32)/255.0)
-                roi[:,:,:3] = (unit[:,:,:3].astype(np.float32)*a_u + roi[:,:,:3].astype(np.float32)*(1-a_u)).astype(np.uint8)
-                roi[:,:,3] = np.clip((a_u + roi[:,:,3:4].astype(np.float32)/255.0*(1-a_u))*255.0, 0, 255).astype(np.uint8).squeeze()
-
+    # Build tiled layer by rotating context via separate image
+    tiled = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     angle = float(angle_deg or 0.0)
-    M = cv2.getRotationMatrix2D((big.shape[1]/2, big.shape[0]/2), angle, 1.0)
-    rotated = cv2.warpAffine(big, M, (big.shape[1], big.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
-    cx = (rotated.shape[1] - w)//2
-    cy = (rotated.shape[0] - h)//2
-    overlay = rotated[cy:cy+h, cx:cx+w]
 
-    out = base.copy()
-    a_ov = (overlay[:,:,3:4].astype(np.float32)/255.0)
-    out[:,:,:3] = (overlay[:,:,:3].astype(np.float32)*a_ov + out[:,:,:3].astype(np.float32)*(1-a_ov)).astype(np.uint8)
-    out[:,:,3] = np.clip((a_ov + out[:,:,3:4].astype(np.float32)/255.0*(1-a_ov))*255.0, 0, 255).astype(np.uint8).squeeze()
-    return _bgra_to_pil(out)
+    # We draw on a larger canvas to avoid empty corners after rotation
+    big = Image.new("RGBA", (width * 3, height * 3), (0, 0, 0, 0))
+    for y0 in range(0, big.size[1], step_y):
+        for x0 in range(0, big.size[0], step_x):
+            big.alpha_composite(unit, (x0, y0))
+
+    rotated = big.rotate(angle, resample=Image.BICUBIC, expand=True)
+    # Paste center crop to match original size
+    rx, ry = rotated.size
+    cx = (rx - width) // 2
+    cy = (ry - height) // 2
+    overlay = rotated.crop((cx, cy, cx + width, cy + height))
+
+    out = Image.alpha_composite(base, overlay)
+    return out.convert("RGB")
 
 
 def add_signature_watermark_tiled(
@@ -372,54 +261,48 @@ def add_signature_watermark_tiled(
     spacing_rel: float = 0.3,
     scale_mul: float = 1.0,
 ) -> Image.Image:
-    """Tile a logo PNG across the whole image with rotation using OpenCV."""
-    base = _pil_to_bgra(img)
-    h, w = base.shape[:2]
-    sig = signature_rgba.convert('RGBA')
-    sig_bgra = _pil_to_bgra(sig)
+    """Tile a logo PNG across the whole image with rotation."""
+    if img.mode != "RGBA":
+        base = img.convert("RGBA")
+    else:
+        base = img.copy()
 
-    target_w = max(64, int(w * 0.15))
+    width, height = base.size
+    sig = signature_rgba.convert("RGBA")
+
+    target_w = max(64, int(width * 0.15))
     target_w = int(target_w * max(0.5, min(2.0, scale_mul or 1.0)))
-    scale = target_w / sig_bgra.shape[1]
-    target_h = int(sig_bgra.shape[0] * scale)
-    unit = cv2.resize(sig_bgra, (max(1, target_w), max(1, target_h)), interpolation=cv2.INTER_LANCZOS4)
+    scale = target_w / sig.width
+    target_h = int(sig.height * scale)
+    unit = sig.resize((max(1, target_w), max(1, target_h)), Image.LANCZOS)
 
-    # Shadow for unit
+    # Build unit with simple shadow
     try:
-        shadow = unit.copy()
-        shadow[:,:,:3] = 0
-        shadow[:,:,3] = (shadow[:,:,3].astype(np.float32) * (140.0/255.0)).astype(np.uint8)
-        unit_with_shadow = np.zeros_like(unit)
-        a_s = (shadow[:,:,3:4].astype(np.float32)/255.0)
-        unit_with_shadow[:,:,:3] = (shadow[:,:,:3].astype(np.float32)*a_s + unit[:,:,:3].astype(np.float32)*(1-a_s)).astype(np.uint8)
-        unit_with_shadow[:,:,3] = np.clip((a_s + unit[:,:,3:4].astype(np.float32)/255.0*(1-a_s))*255.0,0,255).astype(np.uint8).squeeze()
+        alpha = unit.split()[3]
+        shadow = Image.new("RGBA", unit.size, (0, 0, 0, 140))
+        shadow.putalpha(alpha)
+        unit_with_shadow = Image.new("RGBA", unit.size, (0, 0, 0, 0))
+        unit_with_shadow.alpha_composite(shadow, (2, 2))
+        unit_with_shadow.alpha_composite(unit, (0, 0))
         unit = unit_with_shadow
     except Exception:
         pass
 
-    gap = max(8, int(min(unit.shape[0], unit.shape[1]) * max(0.05, min(1.0, spacing_rel or 0.3))))
-    step_x = unit.shape[1] + gap
-    step_y = unit.shape[0] + gap
+    gap = max(8, int(min(unit.size) * max(0.05, min(1.0, spacing_rel or 0.3))))
+    step_x = unit.size[0] + gap
+    step_y = unit.size[1] + gap
 
-    big = np.zeros((h*3, w*3, 4), dtype=np.uint8)
-    for y0 in range(0, big.shape[0], step_y):
-        for x0 in range(0, big.shape[1], step_x):
-            uy, ux = unit.shape[0], unit.shape[1]
-            if y0+uy <= big.shape[0] and x0+ux <= big.shape[1]:
-                roi = big[y0:y0+uy, x0:x0+ux]
-                a_u = (unit[:,:,3:4].astype(np.float32)/255.0)
-                roi[:,:,:3] = (unit[:,:,:3].astype(np.float32)*a_u + roi[:,:,:3].astype(np.float32)*(1-a_u)).astype(np.uint8)
-                roi[:,:,3] = np.clip((a_u + roi[:,:,3:4].astype(np.float32)/255.0*(1-a_u))*255.0, 0, 255).astype(np.uint8).squeeze()
+    big = Image.new("RGBA", (width * 3, height * 3), (0, 0, 0, 0))
+    for y0 in range(0, big.size[1], step_y):
+        for x0 in range(0, big.size[0], step_x):
+            big.alpha_composite(unit, (x0, y0))
 
     angle = float(angle_deg or 0.0)
-    M = cv2.getRotationMatrix2D((big.shape[1]/2, big.shape[0]/2), angle, 1.0)
-    rotated = cv2.warpAffine(big, M, (big.shape[1], big.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
-    cx = (rotated.shape[1] - w)//2
-    cy = (rotated.shape[0] - h)//2
-    overlay = rotated[cy:cy+h, cx:cx+w]
+    rotated = big.rotate(angle, resample=Image.BICUBIC, expand=True)
+    rx, ry = rotated.size
+    cx = (rx - width) // 2
+    cy = (ry - height) // 2
+    overlay = rotated.crop((cx, cy, cx + width, cy + height))
 
-    out = base.copy()
-    a_ov = (overlay[:,:,3:4].astype(np.float32)/255.0)
-    out[:,:,:3] = (overlay[:,:,:3].astype(np.float32)*a_ov + out[:,:,:3].astype(np.float32)*(1-a_ov)).astype(np.uint8)
-    out[:,:,3] = np.clip((a_ov + out[:,:,3:4].astype(np.float32)/255.0*(1-a_ov))*255.0, 0, 255).astype(np.uint8).squeeze()
-    return _bgra_to_pil(out)
+    out = Image.alpha_composite(base, overlay)
+    return out.convert("RGB")
