@@ -1633,14 +1633,18 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
         # Build payload variants using shared Dodo helper
         from app.utils.dodo import create_checkout_link
 
-        base_metadata = {"token": token, "uid": uid, "vault": vault}
+        # Ensure webhook can resolve the purchasing user reliably
+        # Include both uid aliases in metadata and reference fields at the top level
+        base_metadata = {"token": token, "uid": uid, "user_uid": uid, "vault": vault}
         business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
         brand_id = (os.getenv("DODO_BRAND_ID") or "").strip()
         common_top = {**({"business_id": business_id} if business_id else {}), **({"brand_id": brand_id} if brand_id else {})}
+        ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
 
         alt_payloads = [
             {
                 **common_top,
+                **ref_fields,
                 "amount": amount,
                 "currency": currency,
                 "quantity": 1,
@@ -1649,6 +1653,7 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
             },
             {
                 **common_top,
+                **ref_fields,
                 "amount": amount,
                 "currency": currency,
                 "payment_link": True,
@@ -1657,12 +1662,14 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
             },
             {
                 **common_top,
+                **ref_fields,
                 "items": [{"amount": amount, "currency": currency, "quantity": 1}],
                 "metadata": base_metadata,
                 "return_url": return_url,
             },
             {
                 **common_top,
+                **ref_fields,
                 "payment_details": {"amount": amount, "currency": currency, "quantity": 1},
                 "metadata": base_metadata,
                 "return_url": return_url,
