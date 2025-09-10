@@ -487,7 +487,29 @@ async def pricing_webhook(request: Request):
     # --- Step 7: Resolve plan ---
     plan_raw = str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
     plan = _normalize_plan(plan_raw)
-    if not plan:
+
+    # Detect subscription-style payloads which may not include product_cart
+    sub_id = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
+    is_subscription = bool(sub_id and not (isinstance(event_obj.get("product_cart"), list) and event_obj.get("product_cart")))
+
+    if not plan and is_subscription:
+        # Try mapping subscription_id to plan via env; otherwise use metadata plan or default to photographers
+        sid = sub_id.strip()
+        sid_phot = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
+        sid_ag = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
+        if sid and sid_ag and sid == sid_ag:
+            plan = "agencies"
+        elif sid and sid_phot and sid == sid_phot:
+            plan = "photographers"
+        else:
+            # Fallback to provided metadata plan (already normalized above) or default to photographers
+            plan = _normalize_plan(plan_raw) or "photographers"
+        try:
+            logger.info(f"[pricing.webhook] subscription detected: subscription_id={sid} resolved plan={plan}")
+        except Exception:
+            pass
+
+    if not plan and not is_subscription:
         plan = _plan_from_products(event_obj or {})
     if not plan or plan not in _allowed_plans():
         allowed = sorted(list(_allowed_plans()))
