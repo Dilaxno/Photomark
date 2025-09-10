@@ -20,11 +20,12 @@ PyJWT==2.9.0
 bcrypt==4.2.0
 scikit-image==0.22.0
 torch==2.8.0
+kornia==0.7.3
 transformers==4.44.2
 rawpy==0.18.1
 
 # LUT generation
-PyLUT==0.2.0
+PyLUT==1.4.9
 
 diffusers==0.30.3
 safetensors==0.4.4
