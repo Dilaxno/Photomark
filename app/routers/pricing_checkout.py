@@ -116,11 +116,13 @@ async def create_pricing_link(request: Request):
 
     product_id = _plan_to_product_id(plan)
     if not product_id:
+        logger.warning(f"[pricing.link] missing product id for plan='{plan}'. Check DODO_*_PRODUCT_ID env vars.")
         return JSONResponse({"error": "product_id_not_configured", "plan": plan}, status_code=500)
 
     api_base = (os.getenv("DODO_API_BASE") or "https://api.dodopayments.com").rstrip("/")
     api_key = (os.getenv("DODO_PAYMENTS_API_KEY") or os.getenv("DODO_API_KEY") or "").strip()
     if not api_key:
+        logger.warning("[pricing.link] missing API key (DODO_PAYMENTS_API_KEY/DODO_API_KEY)")
         return JSONResponse({"error": "missing_api_key"}, status_code=500)
 
     # Dodo requires business_id in creation payloads; brand_id optional
@@ -214,6 +216,13 @@ async def create_pricing_link(request: Request):
 
     # Use shared Dodo helper for link creation
     from app.utils.dodo import create_checkout_link
+
+    try:
+        logger.info(
+            f"[pricing.link] creating link: plan={plan} product_id_set={bool(product_id)} api_base='{api_base}' business_id_set={bool(business_id)} brand_id_set={bool(brand_id)}"
+        )
+    except Exception:
+        pass
 
     link, details = await create_checkout_link(alt_payloads)
     if link:
