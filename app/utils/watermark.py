@@ -1,5 +1,9 @@
 from typing import Optional, Tuple
 import os
+import hashlib
+import tempfile
+from urllib.parse import urlparse
+from urllib.request import urlretrieve
 import numpy as np
 import cv2
 from PIL import Image
@@ -47,13 +51,41 @@ def _font_candidates() -> list[str | None]:
     return [
         os.getenv("WATERMARK_TTF"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "arial.ttf",
     ]
 
 
+_FONT_CACHE_DIR: Optional[str] = None
+
+
 def _resolve_ttf() -> Optional[str]:
+    # Allow specifying a URL in env; download and cache it once
+    env_ttf = os.getenv("WATERMARK_TTF")
+    if env_ttf and env_ttf.strip().lower().startswith(("http://", "https://")):
+        try:
+            parsed = urlparse(env_ttf)
+            # determine extension from URL path
+            _, ext = os.path.splitext(parsed.path)
+            if not ext:
+                ext = ".ttf"
+            cache_dir = os.getenv("WATERMARK_FONT_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "photomark_fonts")
+            os.makedirs(cache_dir, exist_ok=True)
+            h = hashlib.sha256(env_ttf.encode("utf-8")).hexdigest()[:16]
+            dest = os.path.join(cache_dir, f"{h}{ext}")
+            if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+                urlretrieve(env_ttf, dest)
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                global _FONT_CACHE_DIR
+                _FONT_CACHE_DIR = cache_dir
+                return dest
+        except Exception as e:
+            logger.warning("Failed to cache font from URL; will try local font candidates. Error: %s", e)
+
     for fp in _font_candidates():
         if not fp:
             continue
@@ -68,6 +100,34 @@ def _resolve_ttf() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+# Cache the resolved TTF and track one-time warnings to avoid log spam
+TTF_PATH: Optional[str] = _resolve_ttf()
+_WARNED_PIL_FALLBACK = False
+_WARNED_NO_TTF = False
+_LOGGED_FONT_HEALTH = False
+
+
+def _log_font_health_once() -> None:
+    global _LOGGED_FONT_HEALTH
+    if _LOGGED_FONT_HEALTH:
+        return
+    env_val = os.getenv("WATERMARK_TTF")
+    env_set = bool(env_val)
+    cache_dir = _FONT_CACHE_DIR or "-"
+    logger.info(
+        "Watermark text renderer: freetype=%s, font_resolved=%s, env_set=%s, cache_dir=%s",
+        "yes" if HAS_FT else "no",
+        TTF_PATH or "None",
+        env_set,
+        cache_dir,
+    )
+    _LOGGED_FONT_HEALTH = True
+
+
+# Log on module import
+_log_font_health_once()
 
 
 def _pil_to_bgra(img: Image.Image) -> np.ndarray:
@@ -118,9 +178,12 @@ def add_text_watermark(
     r, g, b = _parse_hex_color(color or '#ffffff')
     a = float(max(0.0, min(1.0, opacity if opacity is not None else 0.96)))
 
-    ttf = _resolve_ttf()
+    global _WARNED_PIL_FALLBACK, TTF_PATH
+    ttf = TTF_PATH
     if not HAS_FT or not ttf:
-        logger.warning("cv2.freetype or TTF not available; falling back to PIL for text watermark")
+        if not _WARNED_PIL_FALLBACK:
+            logger.warning("cv2.freetype or TTF not available; falling back to PIL for text watermark")
+            _WARNED_PIL_FALLBACK = True
         # Fallback to PIL rendering by delegating to previous algorithm via simple path
         from PIL import ImageDraw, ImageFont  # local import to reduce global PIL use
         im_rgba = img.convert('RGBA')
@@ -242,12 +305,18 @@ def add_text_watermark_tiled(
 ) -> Image.Image:
     """Tile watermark text with OpenCV+FreeType; rotation via cv2.warpAffine."""
     if not HAS_FT:
-        logger.warning("cv2.freetype not available; falling back to single watermark via PIL path")
+        global _WARNED_PIL_FALLBACK
+        if not _WARNED_PIL_FALLBACK:
+            logger.warning("cv2.freetype not available; falling back to single watermark via PIL path")
+            _WARNED_PIL_FALLBACK = True
         return add_text_watermark(img, text, position='center', color=color, opacity=opacity, bg_box=False)
 
-    ttf = _resolve_ttf()
+    global TTF_PATH, _WARNED_NO_TTF
+    ttf = TTF_PATH
     if not ttf:
-        logger.warning("TTF font not found; falling back to single watermark")
+        if not _WARNED_NO_TTF:
+            logger.warning("TTF font not found; falling back to single watermark")
+            _WARNED_NO_TTF = True
         return add_text_watermark(img, text, position='center', color=color, opacity=opacity, bg_box=False)
 
     base = _pil_to_bgra(img)
