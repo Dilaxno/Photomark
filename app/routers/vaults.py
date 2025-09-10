@@ -807,6 +807,26 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         "created_at": now.isoformat(),
         "max_uses": 1,
     }
+    # Optional: password to unlock removal of invisible watermark (unmarked originals access)
+    try:
+        remove_pw = str((payload or {}).get('remove_password') or '').strip()
+        if remove_pw:
+            # Only enable if at least one photo has invisible watermark
+            has_any_invisible = False
+            try:
+                for k in keys[:50]:  # cap detection for performance
+                    if _has_invisible_mark(uid, k):
+                        has_any_invisible = True
+                        break
+            except Exception:
+                has_any_invisible = False
+            if has_any_invisible:
+                import hashlib
+                salt = f"share::{token}"
+                rec["remove_pw_hash"] = hashlib.sha256(((remove_pw or '') + salt).encode('utf-8')).hexdigest()
+                rec["remove_pw_required"] = True
+    except Exception:
+        pass
     _write_json_key(_share_key(token), rec)
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
@@ -817,18 +837,32 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     noun = "photo" if count == 1 else "photos"
 
     subject = f"You have access to {count} {noun}"
+    # Build intro; include removal password if configured
+    intro_core = (
+        f"You have been granted one-time access to {count} {noun} in a photo vault."
+        f"<br>This link expires on: <strong>{expires_at_iso}</strong>"
+    )
+    try:
+        if rec.get("remove_pw_hash"):
+            intro_core += "<br><strong>Removal password</strong> (to unlock originals without invisible watermark): "
+            intro_core += f"<code>{(payload or {}).get('remove_password') or ''}</code>"
+    except Exception:
+        pass
     html = render_email(
         "email_basic.html",
         title="You've been granted access",
-        intro=(
-            f"You have been granted one-time access to {count} {noun} in a photo vault."
-            f"<br>This link expires on: <strong>{expires_at_iso}</strong>"
-        ),
+        intro=intro_core,
         button_label="Open vault",
         button_url=link,
         footer_note="If you did not expect this email, you can ignore it.",
     )
     text = f"Open this link to view the shared vault with {count} {noun} (expires {expires_at_iso}): {link}"
+    try:
+        if rec.get("remove_pw_hash"):
+            text += "\nRemoval password (to unlock originals without invisible watermark): "
+            text += str((payload or {}).get('remove_password') or '')
+    except Exception:
+        pass
 
     sent = send_email_smtp(email, subject, html, text)
     if not sent:
@@ -1015,7 +1049,7 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
         return JSONResponse({"error": "upload failed"}, status_code=500)
 
 @router.get("/vaults/shared/photos")
-async def vaults_shared_photos(token: str):
+async def vaults_shared_photos(token: str, password: Optional[str] = None):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -1045,9 +1079,18 @@ async def vaults_shared_photos(token: str):
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
-    # If licensed, attach original_url where available
+    # If licensed, or password matches the removal password, attach original_url where available
     licensed = bool(rec.get("licensed"))
-    if licensed:
+    removal_unlocked = False
+    try:
+        if rec.get("remove_pw_hash"):
+            import hashlib
+            salt = f"share::{token}"
+            if hashlib.sha256(((password or '') + salt).encode('utf-8')).hexdigest() == rec.get("remove_pw_hash"):
+                removal_unlocked = True
+    except Exception:
+        removal_unlocked = False
+    if licensed or removal_unlocked:
         try:
             if s3 and R2_BUCKET:
                 # Build lookup of originals to attach to items
@@ -1193,7 +1236,7 @@ async def vaults_shared_photos(token: str):
     except Exception:
         retouch = {}
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool(rec.get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
@@ -1834,7 +1877,7 @@ async def dodo_webhook(request: Request):
 
 
 @router.get("/vaults/shared/originals.zip")
-async def vaults_shared_originals_zip(token: str):
+async def vaults_shared_originals_zip(token: str, password: Optional[str] = None):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -1850,8 +1893,19 @@ async def vaults_shared_originals_zip(token: str):
     if exp and now > exp:
         return JSONResponse({"error": "expired"}, status_code=410)
 
-    if not rec.get("licensed"):
-        return JSONResponse({"error": "license required"}, status_code=402)
+    # Allow if licensed OR correct removal password provided
+    allow_download = bool(rec.get("licensed"))
+    if not allow_download:
+        try:
+            if rec.get("remove_pw_hash"):
+                import hashlib
+                salt = f"share::{token}"
+                if hashlib.sha256(((password or '') + salt).encode('utf-8')).hexdigest() == rec.get("remove_pw_hash"):
+                    allow_download = True
+        except Exception:
+            allow_download = False
+    if not allow_download:
+        return JSONResponse({"error": "not licensed"}, status_code=403)
 
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
