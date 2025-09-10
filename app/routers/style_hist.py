@@ -9,6 +9,7 @@ import concurrent.futures as cf
 import numpy as np
 from PIL import Image
 from skimage import color
+import cv2
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
@@ -159,6 +160,21 @@ def _reinhard_apply(target_lab: np.ndarray, tgt_mean: np.ndarray, tgt_std: np.nd
   return out
 
 
+def _rgb_to_lab_cv(rgb_float: np.ndarray) -> np.ndarray:
+  """RGB float32 [0,1] -> Lab float32 where L[0,100], a/b[-128,127]."""
+  if rgb_float.dtype != np.float32:
+    rgb_float = rgb_float.astype(np.float32)
+  return cv2.cvtColor(rgb_float, cv2.COLOR_RGB2LAB)
+
+
+def _lab_to_rgb_cv(lab: np.ndarray) -> np.ndarray:
+  """Lab float32 (L[0,100], a/b approx [-128,127]) -> RGB float32 [0,1]."""
+  if lab.dtype != np.float32:
+    lab = lab.astype(np.float32)
+  rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+  return np.clip(rgb, 0.0, 1.0)
+
+
 def _process_blob_reinhard(
   blob: bytes,
   filename: str,
@@ -166,23 +182,27 @@ def _process_blob_reinhard(
   ref_std: np.ndarray,
   fmt: str,
   quality: float,
+  preview_max_side: int | None = None,
 ) -> Tuple[str, bytes]:
   """Worker for Reinhard transfer: compute target stats on downscaled target, apply to full-res in Lab."""
   # Load full target
   tgt_img_full = Image.open(io.BytesIO(blob)).convert('RGB')
+  # If preview, process a capped-resolution version for speed
+  if preview_max_side and max(tgt_img_full.size) > preview_max_side:
+    tgt_img_full = _downscale(tgt_img_full, preview_max_side)
   tgt_full_np_u8 = _pil_to_np_rgb(tgt_img_full)
   tgt_full_np = _rgb_uint8_to_float(tgt_full_np_u8)
   # Downscale for stats
-  tgt_small = _downscale(tgt_img_full, 512)
+  tgt_small = _downscale(tgt_img_full, 384)
   tgt_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(tgt_small))
 
   # Convert to Lab
-  tgt_small_lab = color.rgb2lab(tgt_small_np)
+  tgt_small_lab = _rgb_to_lab_cv(tgt_small_np)
   tgt_mean, tgt_std = _lab_stats(tgt_small_lab)
 
-  tgt_full_lab = color.rgb2lab(tgt_full_np)
+  tgt_full_lab = _rgb_to_lab_cv(tgt_full_np)
   out_lab = _reinhard_apply(tgt_full_lab, tgt_mean, tgt_std, ref_mean, ref_std)
-  out_rgb = color.lab2rgb(out_lab)
+  out_rgb = _lab_to_rgb_cv(out_lab)
   out_u8 = np.clip(np.rint(out_rgb * 255.0), 0, 255).astype(np.uint8)
   out_img = _np_to_pil(out_u8)
 
@@ -190,7 +210,8 @@ def _process_blob_reinhard(
   out_fmt = (fmt or 'jpg').lower()
   if out_fmt in ('jpg', 'jpeg'):
     q = int(max(1, min(100, round((quality or 0.92) * 100))))
-    out_img.save(buf, format='JPEG', quality=q, subsampling=0, progressive=True, optimize=True)
+    # Faster save: avoid progressive/optimize and custom subsampling for speed
+    out_img.save(buf, format='JPEG', quality=q)
     ext = 'jpg'
   else:
     out_img.save(buf, format='PNG')
@@ -283,7 +304,7 @@ async def hist_match(
     if not ref_bytes:
       return JSONResponse({"error": "empty reference"}, status_code=400)
     ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
-    ref_small = _downscale(ref_img_full, 512)
+    ref_small = _downscale(ref_img_full, 384)
     ref_small_np = _pil_to_np_rgb(ref_small)
     ref_cdf = _cdf_3x256(ref_small_np)
 
@@ -370,6 +391,7 @@ async def reinhard_match(
   files: List[UploadFile] = File(..., description='Target images to apply reference style to'),
   fmt: Optional[str] = Form('jpg'),
   quality: Optional[float] = Form(0.92),
+  preview: Optional[int] = Form(0),
 ):
   """
   Copy the color style using Reinhard mean/std transfer in Lab space.
@@ -401,7 +423,8 @@ async def reinhard_match(
     ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
     ref_small = _downscale(ref_img_full, 512)
     ref_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(ref_small))
-    ref_lab = color.rgb2lab(ref_small_np)
+    # Use OpenCV for faster Lab conversion
+    ref_lab = _rgb_to_lab_cv(ref_small_np)
     ref_mean, ref_std = _lab_stats(ref_lab)
 
     # Collect target bytes
@@ -426,13 +449,23 @@ async def reinhard_match(
 
     if len(inputs) == 1 or max_workers == 1:
       for i, name, blob in inputs:
-        out_name, out_bytes = _process_blob_reinhard(blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92))
+        out_name, out_bytes = _process_blob_reinhard(
+          blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92),
+          1600 if (preview and len(inputs) == 1) else None,
+        )
         results.append((i, out_name, out_bytes))
     else:
       with cf.ProcessPoolExecutor(max_workers=max_workers) as ex:
         futures = []
         for i, name, blob in inputs:
-          futures.append((i, name, ex.submit(_process_blob_reinhard, blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92))))
+          futures.append((
+            i, name,
+            ex.submit(
+              _process_blob_reinhard,
+              blob, name, ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92),
+              1600 if (preview and len(inputs) == 1) else None,
+            )
+          ))
         for i, name, fut in futures:
           try:
             out_name, out_bytes = fut.result()
