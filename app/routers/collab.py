@@ -532,15 +532,16 @@ async def send_multiple_to_friend(
         sender_email = get_user_email_from_uid(sender_uid) or "a friend"
         gallery_link = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip().rstrip("/") + "#gallery"
         ok_count = len([x for x in items if x.get('ok')])
+        noun = "photo" if ok_count == 1 else "photos"
         html = render_email(
             "email_basic.html",
-            title="You received photos",
-            intro=f"<p>You received {ok_count} photos from <b>{sender_email}</b> to your gallery.</p>",
+            title=("You received a photo" if ok_count == 1 else "You received photos"),
+            intro=f"<p>You received {ok_count} {noun} from <b>{sender_email}</b> to your gallery.</p>",
             button_url=gallery_link,
             button_label="Open your gallery",
             footer_note="If you weren't expecting this, you can ignore this message.",
         )
-        send_email_smtp(email, "New photos received", html)
+        send_email_smtp(email, ("New photo received" if ok_count == 1 else "New photos received"), html)
     except Exception as ex:
         logger.warning(f"Email notify failed (send-multiple-to-friend): {ex}")
 
@@ -677,18 +678,23 @@ async def send_existing(
         results.append(per_email)
 
     try:
-        if emails:
+        if emails and results:
             sender_email = get_user_email_from_uid(uid) or "a friend"
             gallery_link = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip().rstrip("/") + "#gallery"
+            # Follow existing behavior: notify only the first recipient, but pluralize based on their item count
+            first = results[0] if isinstance(results[0], dict) else {}
+            ok_items = [it for it in (first.get("items") or []) if it.get("ok")]
+            ok_count = len(ok_items)
+            noun = "photo" if ok_count == 1 else "photos"
             html = render_email(
                 "email_basic.html",
-                title="You received photos",
-                intro=f"<p>You received photos from <b>{sender_email}</b> to your gallery.</p>" + (f"<p>Note: {note}</p>" if note else ""),
+                title=("You received a photo" if ok_count == 1 else "You received photos"),
+                intro=(f"<p>You received {ok_count} {noun} from <b>{sender_email}</b> to your gallery.</p>" + (f"<p>Note: {note}</p>" if note else "")),
                 button_url=gallery_link,
                 button_label="Open your gallery",
                 footer_note="If you weren't expecting this, you can ignore this message.",
             )
-            send_email_smtp(emails[0], "New photos received", html)
+            send_email_smtp(emails[0], ("New photo received" if ok_count == 1 else "New photos received"), html)
     except Exception as ex:
         logger.warning(f"Email notify failed (send-existing): {ex}")
 
