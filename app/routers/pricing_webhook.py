@@ -159,20 +159,44 @@ def _plan_from_products(obj: dict) -> str:
     names: list[str] = []
 
     try:
-        items = obj.get("product_cart") or []
-        if isinstance(items, list):
+        # Collect potential arrays where products may be listed
+        candidate_lists = []
+        for key in ("product_cart", "items", "products", "lines", "line_items"):
+            val = obj.get(key)
+            if isinstance(val, list) and val:
+                candidate_lists.append(val)
+            elif isinstance(val, dict):
+                # Some providers use objects with a nested 'data' array
+                data_arr = val.get("data") if isinstance(val.get("data"), list) else None
+                if data_arr:
+                    candidate_lists.append(data_arr)
+
+        # Inspect each list entry and try to resolve product id/name
+        for items in candidate_lists:
+            if not isinstance(items, list):
+                continue
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                # Direct fields
-                pid = str((it.get("product_id") or it.get("id") or "")).strip()
+                pid = str((it.get("product_id") or it.get("price_id") or it.get("id") or "")).strip()
                 name = str((it.get("product_name") or it.get("name") or it.get("title") or "")).strip()
-                # Nested product object
-                p = it.get("product")
-                if isinstance(p, dict):
+
+                # Nested price/product structures
+                p = it.get("product") if isinstance(it.get("product"), dict) else None
+                pr = it.get("price") if isinstance(it.get("price"), dict) else None
+                if p:
                     pid = pid or str((p.get("id") or p.get("product_id") or "")).strip()
                     name = name or str((p.get("name") or p.get("title") or "")).strip()
+                if pr:
+                    # Some APIs put product under price.product
+                    pp = pr.get("product") if isinstance(pr.get("product"), dict) else None
+                    if pp:
+                        pid = pid or str((pp.get("id") or pp.get("product_id") or "")).strip()
+                        name = name or str((pp.get("name") or pp.get("title") or "")).strip()
+                    # Or the price itself is the id we map to a product id
+                    pid = pid or str((pr.get("id") or pr.get("price_id") or "")).strip()
 
+                # Compare ids against configured product ids
                 if pid_ag and pid and pid == pid_ag:
                     found_ag = True
                 if pid_phot and pid and pid == pid_phot:
@@ -181,7 +205,7 @@ def _plan_from_products(obj: dict) -> str:
                     names.append(name)
 
         # Sometimes a single product object may be present
-        if not items and isinstance(obj.get("product"), dict):
+        if isinstance(obj.get("product"), dict):
             p = obj.get("product") or {}
             pid = str((p.get("id") or p.get("product_id") or "")).strip()
             name = str((p.get("name") or p.get("title") or "")).strip()
