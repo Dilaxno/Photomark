@@ -93,12 +93,7 @@ try:
 except Exception as _ex:
     logger.warning(f"moodboard router not available: {_ex}")
 
-# Stable Diffusion img2img endpoint
-try:
-    from app.routers import sd_img2img  # noqa: E402
-    app.include_router(sd_img2img.router)
-except Exception as _ex:
-    logger.warning(f"sd_img2img router not available: {_ex}")
+# Stable Diffusion img2img endpoint removed
 
 # instructions-based edit tool removed
 
