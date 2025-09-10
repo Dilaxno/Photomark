@@ -181,7 +181,7 @@ async def chat(request: Request, body: Dict[str, Any]):
             count = len(photos_preview)
         except Exception:
             count = 0
-        return {"reply": f"This will delete {count} photo(s). Confirm?", "requires_confirmation": {"op": "delete_all", "count": count}}
+        return {"reply": f"This will delete {count} photo(s). Confirm?", "requires_confirmation": {"op": "delete_all", "count": count}, "commands": commands}
 
     executed: Dict[str, Any] = {"deleted": [], "errors": [], "vault": None, "download": None, "download_links": []}
 
@@ -352,4 +352,5 @@ async def chat(request: Request, body: Dict[str, Any]):
         logger.exception(f"assistant execute error: {ex}")
 
     reply = plan.get("reply") or "Done."
-    return {"reply": reply, "executed": executed}
+    # Return commands for client-side agents (voice Mark) and executed summary for UI updates
+    return {"reply": reply, "commands": commands, "executed": executed}
