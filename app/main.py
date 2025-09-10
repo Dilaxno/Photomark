@@ -2,8 +2,17 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
+import warnings
 
 from app.core.config import logger
+
+# Silence a noisy Kornia FutureWarning (does not affect our watermark pipeline)
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.cuda\.amp\.custom_fwd",
+    category=FutureWarning,
+    module=r"kornia\.feature\.lightglue"
+)
 
 # Routers
 from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading
