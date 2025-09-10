@@ -372,8 +372,12 @@ async def pricing_webhook(request: Request):
 
     # --- Step 4: Normalize event object ---
     event_obj = None
+    # Common provider shapes: { data: { object: {...} } }
     if isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("object"), dict):
         event_obj = payload["data"]["object"]
+    # Some send arrays: { data: [ { object: {...} }, ... ] }
+    elif isinstance(payload.get("data"), list) and payload.get("data") and isinstance(payload["data"][0], dict) and isinstance(payload["data"][0].get("object"), dict):
+        event_obj = payload["data"][0]["object"]
     elif isinstance(payload.get("object"), dict):
         event_obj = payload["object"]
     else:
