@@ -94,6 +94,58 @@ def _first_email_from_payload(payload: dict) -> str:
     return candidates[0] if candidates else ""
 
 
+def _deep_find_first(obj: dict, keys: tuple[str, ...]) -> str:
+    """Recursively search a dict for the first non-empty string value for any key in keys.
+    Limits depth and size to avoid pathological payloads.
+    """
+    if not isinstance(obj, dict):
+        return ""
+    seen: set[int] = set()
+
+    def _walk(node: dict, depth: int) -> str:
+        if depth > 6:
+            return ""
+        node_id = id(node)
+        if node_id in seen:
+            return ""
+        seen.add(node_id)
+
+        # Direct match on this level
+        for k in keys:
+            if k in node:
+                v = node.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        # Check common wrappers
+        for k in ("object", "data", "attributes", "details"):
+            sub = node.get(k)
+            if isinstance(sub, dict):
+                got = _walk(sub, depth + 1)
+                if got:
+                    return got
+            elif isinstance(sub, list):
+                for it in sub[:50]:
+                    if isinstance(it, dict):
+                        got = _walk(it, depth + 1)
+                        if got:
+                            return got
+        # Generic recursive descent over other dict and list values
+        for v in list(node.values())[:100]:
+            if isinstance(v, dict):
+                got = _walk(v, depth + 1)
+                if got:
+                    return got
+            elif isinstance(v, list):
+                for it in v[:50]:
+                    if isinstance(it, dict):
+                        got = _walk(it, depth + 1)
+                        if got:
+                            return got
+        return ""
+
+    return _walk(obj, 0)
+
+
 def _plan_from_products(obj: dict) -> str:
     """Infer plan from Dodo payload products when explicit plan metadata is missing.
     Prefers mapping by configured product IDs, then by product names, and only returns
@@ -297,6 +349,12 @@ async def pricing_webhook(request: Request):
                         break
             if uid:
                 break
+
+    # Fallback: provider-specific nesting (deep scan)
+    if not uid and isinstance(payload, dict):
+        deep_uid = _deep_find_first(payload, ("user_uid", "userUid", "uid", "client_reference_id", "reference_id", "external_id", "order_id"))
+        if deep_uid:
+            uid = deep_uid
 
     # Fallback by email
     if not uid:
