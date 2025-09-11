@@ -1293,8 +1293,8 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
                 if not k:
                     continue
                 st = str(it.get("status") or "open").lower()
-                rec = per_photo.get(k)
-                if (not rec) or (str(it.get("updated_at") or "") > str(rec.get("updated_at") or "")):
+                prev = per_photo.get(k)
+                if (not prev) or (str(it.get("updated_at") or "") > str(prev.get("updated_at") or "")):
                     per_photo[k] = {
                         "status": st,
                         "id": it.get("id"),
@@ -1307,7 +1307,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
     except Exception:
         retouch = {}
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool(rec.get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
