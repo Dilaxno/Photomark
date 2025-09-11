@@ -18,6 +18,15 @@ except Exception as _ex:
     KF = None  # type: ignore
     logger.warning("PyTorch/Kornia not available; falling back to PIL-only logic where needed. Install torch + kornia for GPU acceleration.")
 
+# Prefer PIL for watermarking by default; set WATERMARK_USE_PIL=0 to allow Torch/Kornia paths
+_FORCE_PIL = (os.getenv("WATERMARK_USE_PIL", "1") or "").strip().lower() not in ("0", "false", "no")
+
+def _use_pil() -> bool:
+    try:
+        return (torch is None) or _FORCE_PIL
+    except Exception:
+        return True
+
 
 def _pil_to_tensor_rgba(img: Image.Image, device: Optional[str] = None) -> Optional["torch.Tensor"]:
     """Convert PIL RGBA image to torch float tensor CHW in [0,1]. Returns None if torch not available."""
@@ -140,7 +149,7 @@ def add_text_watermark(
     draw.text((x, y), text, font=font, fill=(r, g, b, a), stroke_width=stroke_w, stroke_fill=(0, 0, 0, min(220, a)))
 
     # Torch compositing
-    if torch is None:
+    if _use_pil():
         return Image.alpha_composite(base_pil, overlay).convert("RGB")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -163,7 +172,7 @@ def add_signature_watermark(img: Image.Image, signature_rgba: Image.Image, posit
     base_rgba = img.convert('RGBA')
     W, H = base_rgba.size
 
-    if torch is None:
+    if _use_pil():
         # Fallback to PIL path (original logic)
         base = base_rgba.copy()
         width, height = base.size
@@ -307,8 +316,8 @@ def add_text_watermark_tiled(
     stroke_w = max(1, size // 14)
     udraw.text((bx, by), text, font=font, fill=(r, g, b, a), stroke_width=stroke_w, stroke_fill=(0, 0, 0, min(220, a)))
 
-    if torch is None:
-        # Fallback to PIL implementation if torch missing
+    if _use_pil():
+        # Fallback to PIL implementation (PIL path)
         gap = max(8, int(min(unit_w, unit_h) * max(0.05, min(1.0, spacing_rel or 0.3))))
         step_x = unit_w + gap
         step_y = unit_h + gap
@@ -381,7 +390,7 @@ def add_signature_watermark_tiled(
     target_h = max(1, int(sig.height * scale))
     unit = sig.resize((max(1, target_w), target_h), Image.LANCZOS)
 
-    if torch is None:
+    if _use_pil():
         # PIL fallback
         try:
             alpha = unit.split()[3]
