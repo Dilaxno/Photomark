@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 # ---- Tiny in-memory caches for repeated previews with same reference ----
 _REF_CDF_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _REF_LAB_CACHE: "OrderedDict[str, tuple[np.ndarray, np.ndarray]]" = OrderedDict()
@@ -23,7 +25,6 @@ from starlette.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Tuple
 import io
 import hashlib
-from collections import OrderedDict
 import zipfile
 import os
 import concurrent.futures as cf
