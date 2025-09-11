@@ -5,6 +5,7 @@ import secrets
 import io
 import zipfile
 import httpx
+import asyncio
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Body, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -57,6 +58,40 @@ def _approval_key(uid: str, vault: str) -> str:
 def _favorites_key(uid: str, vault: str) -> str:
     safe = "".join(c for c in vault if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
     return f"users/{uid}/vaults/_favorites/{safe}.json"
+
+# Lightweight versioning helpers for real-time polling/streaming
+
+def _approvals_version_key(uid: str, vault: str) -> str:
+    safe = _vault_key(uid, vault)[1]
+    return f"users/{uid}/vaults/_approvals/{safe}.ver.json"
+
+
+def _retouch_version_key(uid: str, vault: str) -> str:
+    safe = _vault_key(uid, vault)[1]
+    return f"users/{uid}/retouch/_ver/{safe}.json"
+
+
+def _touch_version(key: str):
+    try:
+        _write_json_key(key, {"updated_at": datetime.utcnow().isoformat()})
+    except Exception:
+        pass
+
+
+def _read_version(key: str) -> str:
+    try:
+        rec = _read_json_key(key) or {}
+        return str(rec.get("updated_at") or "")
+    except Exception:
+        return ""
+
+
+def _touch_approvals_version(uid: str, vault: str):
+    _touch_version(_approvals_version_key(uid, vault))
+
+
+def _touch_retouch_version(uid: str, vault: str):
+    _touch_version(_retouch_version_key(uid, vault))
 
 # Retouch queue helpers (per-user global queue)
 
@@ -1295,6 +1330,10 @@ def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, a
     by_photo[photo_key] = photo
     data["by_photo"] = by_photo
     _write_json_key(_approval_key(uid, vault), data)
+    try:
+        _touch_approvals_version(uid, vault)
+    except Exception:
+        pass
     return data
 
 
@@ -1444,6 +1483,10 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
         except Exception:
             pass
         _write_retouch_queue(uid, q)
+        try:
+            _touch_retouch_version(uid, vault)
+        except Exception:
+            pass
     except Exception as ex:
         logger.warning(f"retouch queue append failed: {ex}")
         return JSONResponse({"error": "failed to save"}, status_code=500)
@@ -1615,6 +1658,79 @@ async def retouch_queue(request: Request, email: Optional[str] = None, vault: Op
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
+@router.get("/vaults/realtime/version")
+async def vaults_realtime_version(request: Request, vault: str):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        a_ver = _read_version(_approvals_version_key(uid, safe_vault))
+        r_ver = _read_version(_retouch_version_key(uid, safe_vault))
+        return {
+            "vault": safe_vault,
+            "approvals_updated_at": a_ver,
+            "retouch_updated_at": r_ver,
+            "server_time": datetime.utcnow().isoformat(),
+            "suggested_poll_seconds": 5,
+        }
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+@router.get("/vaults/realtime/stream")
+async def vaults_realtime_stream(request: Request, vault: str, poll_seconds: float = 2.0):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    async def event_gen():
+        last_a = _read_version(_approvals_version_key(uid, safe_vault))
+        last_r = _read_version(_retouch_version_key(uid, safe_vault))
+        import json as _json
+        # Send initial state
+        init = _json.dumps({
+            "vault": safe_vault,
+            "approvals_updated_at": last_a,
+            "retouch_updated_at": last_r,
+            "server_time": datetime.utcnow().isoformat(),
+        })
+        yield f"data: {init}\n\n"
+        # Loop until client disconnects
+        while True:
+            try:
+                if await request.is_disconnected():
+                    break
+            except Exception:
+                pass
+            try:
+                await asyncio.sleep(max(0.5, float(poll_seconds)))
+                cur_a = _read_version(_approvals_version_key(uid, safe_vault))
+                cur_r = _read_version(_retouch_version_key(uid, safe_vault))
+                if cur_a != last_a or cur_r != last_r:
+                    last_a, last_r = cur_a, cur_r
+                    payload = _json.dumps({
+                        "vault": safe_vault,
+                        "approvals_updated_at": last_a,
+                        "retouch_updated_at": last_r,
+                        "server_time": datetime.utcnow().isoformat(),
+                    })
+                    yield f"data: {payload}\n\n"
+                else:
+                    # heartbeat to keep connection alive
+                    yield ": keep-alive\n\n"
+            except Exception:
+                # avoid breaking the stream on transient errors
+                continue
+
+    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
+
+
 @router.post("/vaults/retouch/update")
 async def retouch_update(request: Request, payload: dict = Body(...)):
     uid = get_uid_from_request(request)
@@ -1642,6 +1758,10 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
         if not found:
             return JSONResponse({"error": "not found"}, status_code=404)
         _write_retouch_queue(uid, items)
+        try:
+            _touch_retouch_version(uid, str(it.get("vault") or ""))
+        except Exception:
+            pass
         try:
             # Notify client via email about the status change (best-effort)
             client_email = (it.get("client_email") or "").strip()
