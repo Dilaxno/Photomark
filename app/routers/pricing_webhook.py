@@ -413,18 +413,30 @@ async def pricing_webhook(request: Request):
     except Exception:
         pass
 
-    # --- Step 5: Extract metadata ---
+    # --- Step 5: Extract metadata & query_params (overlay checkout) ---
     meta = event_obj.get("metadata") if isinstance(event_obj, dict) else {}
     meta = meta if isinstance(meta, dict) else {}
+    # Overlay Checkout passes identifiers under data.query_params
+    qp = event_obj.get("query_params") if isinstance(event_obj, dict) else {}
+    qp = qp if isinstance(qp, dict) else {}
 
     # --- Step 6: Resolve UID ---
-    uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
-    uid = ""
-    for k in uid_keys:
-        v = str((meta.get(k) if isinstance(meta, dict) else "") or "").strip()
+    # Prefer query_params for overlay integration
+    qp_uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
+    for k in qp_uid_keys:
+        v = str((qp.get(k) if isinstance(qp, dict) else "") or "").strip()
         if v:
             uid = v
             break
+    # Fallback to metadata if not found in query_params
+    uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
+    if not uid:
+        uid = ""
+        for k in uid_keys:
+            v = str((meta.get(k) if isinstance(meta, dict) else "") or "").strip()
+            if v:
+                uid = v
+                break
 
     # Fallback by reference fields
     if not uid:
@@ -489,7 +501,8 @@ async def pricing_webhook(request: Request):
         return {"ok": True, "skipped": True, "reason": "missing_metadata_user_uid"}
 
     # --- Step 7: Resolve plan ---
-    plan_raw = str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
+    # Prefer overlay query_params plan when present
+    plan_raw = str((qp.get("plan") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
     plan = _normalize_plan(plan_raw)
 
     # Detect subscription-style payloads which may not include product_cart
