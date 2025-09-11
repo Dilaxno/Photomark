@@ -395,6 +395,209 @@ async def apply_selective(
         logger.exception(f"Selective color apply failed: {ex}")
         return {"error": str(ex)}
 
+# ---------------- LIGHTROOM-LIKE PIPELINE ----------------
+
+def _apply_white_balance_bgr(img_bgr: np.ndarray, kelvin_shift: float, tint_shift: float) -> np.ndarray:
+    # Simple white balance: adjust in LAB space a/b channels and global scale
+    out = img_bgr.copy()
+    lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).astype(np.int16)
+    L, A, B = lab[...,0], lab[...,1], lab[...,2]
+    # Kelvin: warm(+) pushes B up, cool(-) pushes B down. Scale small.
+    B[:] = np.clip(B + int(kelvin_shift * 0.02), 0, 255)
+    # Tint: green<->magenta affects A
+    A[:] = np.clip(A + int(tint_shift * 0.1), 0, 255)
+    lab = np.stack([L, A, B], axis=-1).astype(np.uint8)
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
+def _apply_exposure_contrast(img_bgr: np.ndarray, factor: float, stops: float, contrast: float) -> np.ndarray:
+    # Exposure via scaling in linear-ish space; contrast via simple S-curve
+    out = img_bgr.astype(np.float32) / 255.0
+    exp = max(0.0, factor) * (2.0 ** stops)
+    out *= exp
+    out = np.clip(out, 0, 1)
+    # Contrast: center around 0.5
+    c = max(0.0, contrast)
+    if abs(c - 1.0) > 1e-6:
+        out = (out - 0.5) * c + 0.5
+        out = np.clip(out, 0, 1)
+    return (out * 255.0).astype(np.uint8)
+
+
+def _apply_highlights_shadows(img_bgr: np.ndarray, highlights: float, shadows: float) -> np.ndarray:
+    # Adjust via luminance mask in HSV V channel
+    out = img_bgr.copy()
+    hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+    V = hsv[...,2] / 255.0
+    # Highlights: negative reduces brights, positive boosts brights (but clamp)
+    if abs(highlights) > 1e-6:
+        mask = np.clip((V - 0.6) * 3.0, 0, 1)  # emphasis on bright
+        V = np.clip(V + mask * (highlights / 300.0), 0, 1)
+    if abs(shadows) > 1e-6:
+        mask = np.clip((0.4 - V) * 3.0, 0, 1)  # emphasis on dark
+        V = np.clip(V + mask * (shadows / 300.0), 0, 1)
+    hsv[...,2] = V * 255.0
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _apply_vibrance_saturation(img_bgr: np.ndarray, saturation: float, vibrance: float) -> np.ndarray:
+    # Saturation uniformly, vibrance less on saturated pixels
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    S = hsv[...,1] / 255.0
+    if abs(vibrance - 1.0) > 1e-6:
+        vib = max(0.0, vibrance)
+        weight = 1.0 - S  # stronger on less saturated areas
+        S = np.clip(S * (1.0 + (vib - 1.0) * weight), 0, 1)
+    if abs(saturation - 1.0) > 1e-6:
+        S = np.clip(S * max(0.0, saturation), 0, 1)
+    hsv[...,1] = S * 255.0
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _apply_clarity(img_bgr: np.ndarray, amount: float) -> np.ndarray:
+    # Local contrast via unsharp on L channel
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
+    blur = cv2.GaussianBlur(L, (0,0), sigmaX=1.5)
+    amt = max(0.0, amount - 1.0) * 2.0
+    sh = cv2.addWeighted(L, 1 + amt, blur, -amt, 0)
+    out = cv2.merge([np.clip(sh,0,255).astype(np.uint8), A, B])
+    return cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+
+
+def _apply_dehaze(img_bgr: np.ndarray, amount: float) -> np.ndarray:
+    # Approx via CLAHE on L channel
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
+    clip = 2.0 + max(0.0, amount) * 6.0
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8,8))
+    L2 = clahe.apply(L)
+    out = cv2.merge([L2, A, B])
+    return cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+
+
+def _apply_sharpen(img_bgr: np.ndarray, radius: float, amount: float) -> np.ndarray:
+    if amount <= 0: return img_bgr
+    sigma = max(0.1, radius)
+    blur = cv2.GaussianBlur(img_bgr, (0,0), sigmaX=sigma)
+    return cv2.addWeighted(img_bgr, 1 + amount, blur, -amount, 0)
+
+
+def _apply_noise_reduction(img_bgr: np.ndarray, lum: float, color: float) -> np.ndarray:
+    out = img_bgr.copy()
+    if lum > 0:
+        # Bilateral filter approximates luminance NR
+        d = 5
+        out = cv2.bilateralFilter(out, d=d, sigmaColor=lum*50, sigmaSpace=lum*50)
+    if color > 0:
+        try:
+            out = cv2.fastNlMeansDenoisingColored(out, None, h=10*color, hColor=10*color, templateWindowSize=7, searchWindowSize=21)
+        except Exception:
+            pass
+    return out
+
+
+def _apply_vignette(img_bgr: np.ndarray, strength: float, radius: float) -> np.ndarray:
+    h, w = img_bgr.shape[:2]
+    kernel_x = cv2.getGaussianKernel(w, w * max(0.001, 1.0 - radius))
+    kernel_y = cv2.getGaussianKernel(h, h * max(0.001, 1.0 - radius))
+    kernel = kernel_y * kernel_x.T
+    mask = kernel / kernel.max()
+    mask = 1 - strength * (1 - mask)
+    out = np.empty_like(img_bgr)
+    for c in range(3):
+        out[...,c] = np.clip(img_bgr[...,c].astype(np.float32) * mask, 0, 255)
+    return out.astype(np.uint8)
+
+
+def _apply_film_grain(img_bgr: np.ndarray, amount: float, size: str) -> np.ndarray:
+    if amount <= 0: return img_bgr
+    h, w = img_bgr.shape[:2]
+    noise = np.random.randn(h, w).astype(np.float32)
+    if size == 'small':
+        pass
+    elif size == 'large':
+        noise = cv2.GaussianBlur(noise, (0,0), 2.0)
+    else:
+        noise = cv2.GaussianBlur(noise, (0,0), 1.0)
+    # apply to luminance in LAB
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[...,0] = np.clip(lab[...,0] + noise * (amount * 10.0), 0, 255)
+    return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def _apply_pipeline_bgr(img_bgr: np.ndarray, settings: dict) -> np.ndarray:
+    s = settings or {}
+    # White balance
+    wb = s.get('whiteBalance') or {}
+    img_bgr = _apply_white_balance_bgr(img_bgr, float(wb.get('kelvin_shift', 0)), float(wb.get('tint_shift', 0)))
+    # Exposure/contrast
+    br = s.get('brightness') or {}
+    ct = s.get('contrast') or {}
+    img_bgr = _apply_exposure_contrast(img_bgr, float(br.get('factor',1.0)), float(br.get('stops',0)), float(ct.get('factor',1.0)))
+    # Highlights/Shadows
+    hs = s.get('highlights_shadows') or {}
+    img_bgr = _apply_highlights_shadows(img_bgr, float(hs.get('highlights',0)), float(hs.get('shadows',0)))
+    # Vibrance/Saturation
+    sat = s.get('saturation') or {}
+    img_bgr = _apply_vibrance_saturation(img_bgr, float(sat.get('saturation_factor',1.0)), float(sat.get('vibrance_factor',1.0)))
+    # Clarity
+    cl = s.get('clarity') or {}
+    img_bgr = _apply_clarity(img_bgr, float(cl.get('amount',1.0)))
+    # Dehaze
+    dh = s.get('dehaze') or {}
+    img_bgr = _apply_dehaze(img_bgr, float(dh.get('amount',0)))
+    # Selective color
+    sel = s.get('selective_color') or {}
+    if isinstance(sel, dict) and sel:
+        img_bgr = _apply_selective_color_bgr(img_bgr, sel)
+    # Noise reduction
+    nr = s.get('noise_reduction') or {}
+    img_bgr = _apply_noise_reduction(img_bgr, float(nr.get('luminance',0)), float(nr.get('color',0)))
+    # Sharpen
+    sh = s.get('sharpness') or {}
+    img_bgr = _apply_sharpen(img_bgr, float(sh.get('radius',1.0)), float(sh.get('amount',1.0)))
+    # Vignette
+    vg = s.get('vignette') or {}
+    img_bgr = _apply_vignette(img_bgr, float(vg.get('strength',0)), float(vg.get('radius',0.75)))
+    # Film grain
+    fg = s.get('film_grain') or {}
+    img_bgr = _apply_film_grain(img_bgr, float(fg.get('amount',0)), str(fg.get('size','medium')))
+    return img_bgr
+
+
+@router.post("/apply")
+async def apply_pipeline(
+    request: Request,
+    file: UploadFile = File(...),
+    settings: str = Form("{}"),
+):
+    """Apply Lightroom-like pipeline using provided settings JSON; returns PNG preview/export."""
+    try:
+        raw = await file.read()
+        if not raw:
+            return {"error": "empty file"}
+        billing_uid = _billing_uid_from_request(request)
+        if not _is_paid_customer(billing_uid):
+            if not _consume_one_free(billing_uid, 'retouch_apply'):
+                return {"error": "free_limit_reached", "message": "Upgrade to continue."}
+        try:
+            s = json.loads(settings or "{}")
+            if not isinstance(s, dict):
+                s = {}
+        except Exception:
+            s = {}
+        arr = np.frombuffer(raw, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"error": "invalid image"}
+        out_bgr = _apply_pipeline_bgr(img, s)
+        out_bgra = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2BGRA)
+        return _encode_png(out_bgra)
+    except Exception as ex:
+        logger.exception(f"Pipeline apply failed: {ex}")
+        return {"error": str(ex)}
+
 
 
 
