@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, Request
+import json
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import io
@@ -110,6 +111,80 @@ def composite_onto_background(fg: np.ndarray, bg: np.ndarray) -> np.ndarray:
 
     out_rgba = np.dstack([out, (alpha * 255).astype(np.uint8).squeeze()])
     return out_rgba
+
+
+# ---------------- SELECTIVE COLOR ----------------
+def _apply_selective_color_bgr(img_bgr: np.ndarray, selective: dict) -> np.ndarray:
+    """Apply per-channel selective color adjustments in HSV.
+    selective is a mapping of channel name -> { hue_shift: -180..180, saturation_shift: -1..1, luminance_shift: -1..1 }
+
+    Channels: reds, oranges, yellows, greens, aquas, blues, purples, magentas.
+    """
+    if not selective:
+        return img_bgr
+
+    # Convert to HSV (OpenCV: H in [0,179], S,V in [0,255])
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.int16)
+    H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+
+    # Define hue ranges for each channel (inclusive), in 0..179.
+    # Approximate ranges with some overlap to avoid seams.
+    ranges = {
+        'reds':      [(0, 10), (170, 179)],
+        'oranges':   [(11, 25)],
+        'yellows':   [(26, 35)],
+        'greens':    [(36, 85)],
+        'aquas':     [(86, 95)],  # cyan
+        'blues':     [(96, 130)],
+        'purples':   [(131, 145)],
+        'magentas':  [(146, 169)],
+    }
+
+    def channel_mask(channel: str) -> np.ndarray:
+        m = np.zeros_like(H, dtype=np.uint8)
+        for lo, hi in ranges.get(channel, []):
+            if lo <= hi:
+                m = cv2.bitwise_or(m, ((H >= lo) & (H <= hi)).astype(np.uint8))
+            else:
+                # wrap-around
+                m = cv2.bitwise_or(m, ((H >= lo) | (H <= hi)).astype(np.uint8))
+        return m
+
+    for ch, params in selective.items():
+        if ch not in ranges:
+            continue
+        hue_shift = float(params.get('hue_shift', 0.0))
+        sat_shift = float(params.get('saturation_shift', 0.0))
+        lum_shift = float(params.get('luminance_shift', 0.0))
+
+        if abs(hue_shift) < 1e-6 and abs(sat_shift) < 1e-6 and abs(lum_shift) < 1e-6:
+            continue
+
+        mask = channel_mask(ch)
+        if mask.max() == 0:
+            continue
+
+        # Expand mask to 0/1 int16
+        m = mask.astype(np.int16)
+
+        # Hue shift: degrees -> OpenCV units (180 deg == 180 units), wrap 0..179
+        dH = int(round(hue_shift))
+        if dH != 0:
+            H[:] = ((H + dH * m) % 180)
+
+        # Saturation shift: scale by (1 + sat_shift)
+        if abs(sat_shift) > 1e-6:
+            factor = 1.0 + sat_shift
+            S[:] = np.clip(S + ((S * (factor - 1.0)) * m / 1).astype(np.int16), 0, 255)
+
+        # Luminance shift approximated via V channel scale
+        if abs(lum_shift) > 1e-6:
+            factor = 1.0 + lum_shift
+            V[:] = np.clip(V + ((V * (factor - 1.0)) * m / 1).astype(np.int16), 0, 255)
+
+    hsv_out = np.stack([H, S, V], axis=-1).astype(np.uint8)
+    out_bgr = cv2.cvtColor(hsv_out, cv2.COLOR_HSV2BGR)
+    return out_bgr
 
 
 # ---------------- MASK CACHING ----------------
@@ -281,6 +356,44 @@ async def recompose_background(
         logger.exception(f"Recompose failed: {ex}")
         return {"error": str(ex)}
 
+
+
+@router.post("/apply_selective")
+async def apply_selective(
+    request: Request,
+    file: UploadFile = File(...),
+    selective: str = Form("{}"),
+):
+    """Apply selective color grading to the uploaded image and return PNG (full resolution)."""
+    try:
+        raw = await file.read()
+        if not raw:
+            return {"error": "empty file"}
+
+        billing_uid = _billing_uid_from_request(request)
+        if not _is_paid_customer(billing_uid):
+            if not _consume_one_free(billing_uid, 'retouch_selective'):
+                return {"error": "free_limit_reached", "message": "Upgrade to continue."}
+
+        try:
+            selective_obj = json.loads(selective or "{}")
+            if not isinstance(selective_obj, dict):
+                selective_obj = {}
+        except Exception:
+            selective_obj = {}
+
+        # Decode full-resolution image using OpenCV
+        arr = np.frombuffer(raw, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"error": "invalid image"}
+
+        out_bgr = _apply_selective_color_bgr(img, selective_obj)
+        out_bgra = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2BGRA)
+        return _encode_png(out_bgra)
+    except Exception as ex:
+        logger.exception(f"Selective color apply failed: {ex}")
+        return {"error": str(ex)}
 
 
 
