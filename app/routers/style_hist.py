@@ -1,14 +1,35 @@
+# ---- Tiny in-memory caches for repeated previews with same reference ----
+_REF_CDF_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_REF_LAB_CACHE: "OrderedDict[str, tuple[np.ndarray, np.ndarray]]" = OrderedDict()
+_CACHE_LIMIT = 32
+
+def _cache_put(cache: "OrderedDict", key: str, value):
+  cache[key] = value
+  cache.move_to_end(key)
+  while len(cache) > _CACHE_LIMIT:
+    try:
+      cache.popitem(last=False)
+    except Exception:
+      break
+
+def _cache_get(cache: "OrderedDict", key: str):
+  if key in cache:
+    cache.move_to_end(key)
+    return cache[key]
+  return None
+
 from fastapi import APIRouter, UploadFile, File, Form, Request
 from starlette.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Tuple
 import io
+import hashlib
+from collections import OrderedDict
 import zipfile
 import os
 import concurrent.futures as cf
 
 import numpy as np
 from PIL import Image
-from skimage import color
 import cv2
 
 from app.core.auth import resolve_workspace_uid, has_role_access
@@ -126,11 +147,18 @@ def _lut_from_cdfs(src_cdf: np.ndarray, ref_cdf: np.ndarray) -> np.ndarray:
 
 
 def _apply_lut_rgb(src_full: np.ndarray, lut: np.ndarray) -> np.ndarray:
-  """Apply per-channel LUT to full-res RGB uint8 array."""
-  out = np.empty_like(src_full)
-  for c in range(3):
-    out[..., c] = lut[c][src_full[..., c]]
-  return out
+  """Apply per-channel LUT to full-res RGB uint8 array. Uses OpenCV cv2.LUT if available (faster)."""
+  try:
+    # cv2.LUT expects shape (256,) per channel
+    out = np.empty_like(src_full)
+    for c in range(3):
+      out[..., c] = cv2.LUT(src_full[..., c], lut[c].reshape(-1))
+    return out
+  except Exception:
+    out = np.empty_like(src_full)
+    for c in range(3):
+      out[..., c] = lut[c][src_full[..., c]]
+    return out
 
 
 # ---------- Reinhard mean/std color transfer helpers ----------
@@ -228,10 +256,14 @@ def _process_blob(
   ref_cdf: np.ndarray,
   fmt: str,
   quality: float,
+  preview_max_side: int | None = None,
 ) -> Tuple[str, bytes]:
   """Worker function: compute LUT from source small vs reference CDF, then apply to full-res and encode."""
   try:
     src_img_full = Image.open(io.BytesIO(blob)).convert('RGB')
+    # For preview, process a capped-resolution version for speed
+    if preview_max_side and max(src_img_full.size) > preview_max_side:
+      src_img_full = _downscale(src_img_full, preview_max_side)
     src_full_np = _pil_to_np_rgb(src_img_full)
 
     # Compute LUT on downscaled image vs precomputed ref CDF
@@ -244,12 +276,12 @@ def _process_blob(
     out_np = _apply_lut_rgb(src_full_np, lut)
     out_img = _np_to_pil(out_np)
 
-    # Encode
+    # Encode (favor speed: avoid progressive/optimize)
     buf = io.BytesIO()
     out_fmt = (fmt or 'jpg').lower()
     if out_fmt in ('jpg', 'jpeg'):
       q = int(max(1, min(100, round((quality or 0.92) * 100))))
-      out_img.save(buf, format='JPEG', quality=q, subsampling=0, progressive=True, optimize=True)
+      out_img.save(buf, format='JPEG', quality=q)
       ext = 'jpg'
     else:
       out_img.save(buf, format='PNG')
@@ -271,6 +303,7 @@ async def hist_match(
   files: List[UploadFile] = File(..., description='Target images to apply reference style to'),
   fmt: Optional[str] = Form('jpg'),
   quality: Optional[float] = Form(0.92),
+  preview: Optional[int] = Form(0),
 ):
   """
   Copy the color style (exposure/color distribution) from a reference image to a batch of images.
@@ -303,10 +336,15 @@ async def hist_match(
     ref_bytes = await reference.read()
     if not ref_bytes:
       return JSONResponse({"error": "empty reference"}, status_code=400)
-    ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
-    ref_small = _downscale(ref_img_full, 384)
-    ref_small_np = _pil_to_np_rgb(ref_small)
-    ref_cdf = _cdf_3x256(ref_small_np)
+    # Cache reference CDF by content hash to speed repeated previews
+    ref_key = hashlib.sha1(ref_bytes).hexdigest()
+    ref_cdf = _cache_get(_REF_CDF_CACHE, ref_key)
+    if ref_cdf is None:
+      ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
+      ref_small = _downscale(ref_img_full, 384)
+      ref_small_np = _pil_to_np_rgb(ref_small)
+      ref_cdf = _cdf_3x256(ref_small_np)
+      _cache_put(_REF_CDF_CACHE, ref_key, ref_cdf)
 
     # Collect input bytes first (UploadFile is not picklable)
     inputs: List[Tuple[int, str, bytes]] = []
@@ -333,7 +371,10 @@ async def hist_match(
       # Sequential path for single image or constrained env
       for i, name, blob in inputs:
         try:
-          out_name, out_bytes = _process_blob(blob, name, ref_cdf, fmt or 'jpg', float(quality or 0.92))
+          out_name, out_bytes = _process_blob(
+            blob, name, ref_cdf, fmt or 'jpg', float(quality or 0.92),
+            1600 if (preview and len(inputs) == 1) else None,
+          )
           results.append((i, out_name, out_bytes))
         except Exception:
           continue
@@ -342,7 +383,14 @@ async def hist_match(
       with cf.ProcessPoolExecutor(max_workers=max_workers) as ex:
         futures = []
         for i, name, blob in inputs:
-          futures.append((i, name, ex.submit(_process_blob, blob, name, ref_cdf, fmt or 'jpg', float(quality or 0.92))))
+          futures.append((
+            i, name,
+            ex.submit(
+              _process_blob,
+              blob, name, ref_cdf, fmt or 'jpg', float(quality or 0.92),
+              1600 if (preview and len(inputs) == 1) else None,
+            )
+          ))
         for i, name, fut in futures:
           try:
             out_name, out_bytes = fut.result()
@@ -420,12 +468,19 @@ async def reinhard_match(
     ref_bytes = await reference.read()
     if not ref_bytes:
       return JSONResponse({"error": "empty reference"}, status_code=400)
-    ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
-    ref_small = _downscale(ref_img_full, 512)
-    ref_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(ref_small))
-    # Use OpenCV for faster Lab conversion
-    ref_lab = _rgb_to_lab_cv(ref_small_np)
-    ref_mean, ref_std = _lab_stats(ref_lab)
+    # Cache reference Lab stats by content hash
+    ref_key = hashlib.sha1(ref_bytes).hexdigest()
+    cached = _cache_get(_REF_LAB_CACHE, ref_key)
+    if cached is None:
+      ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
+      ref_small = _downscale(ref_img_full, 512)
+      ref_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(ref_small))
+      # Use OpenCV for faster Lab conversion
+      ref_lab = _rgb_to_lab_cv(ref_small_np)
+      ref_mean, ref_std = _lab_stats(ref_lab)
+      _cache_put(_REF_LAB_CACHE, ref_key, (ref_mean, ref_std))
+    else:
+      ref_mean, ref_std = cached
 
     # Collect target bytes
     inputs: List[Tuple[int, str, bytes]] = []
