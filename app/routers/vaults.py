@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from app.utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
-from app.core.auth import get_uid_from_request, get_user_email_from_uid
+from app.core.auth import get_uid_from_request, get_user_email_from_uid, get_fs_client
 from app.utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api", tags=["vaults"]) 
@@ -766,6 +766,7 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
 
     vault = str((payload or {}).get('vault') or '').strip()
     email = str((payload or {}).get('email') or '').strip()
+    client_name = str((payload or {}).get('client_name') or '').strip()
     if not vault or not email:
         return JSONResponse({"error": "vault and email required"}, status_code=400)
     # Validate vault exists and get normalized name
@@ -806,6 +807,7 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         "used": False,
         "created_at": now.isoformat(),
         "max_uses": 1,
+        "client_name": client_name,
     }
     # Optional: password to unlock removal of invisible watermark (unmarked originals access)
     try:
@@ -836,33 +838,67 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     count = len(keys)
     noun = "photo" if count == 1 else "photos"
 
-    subject = f"You have access to {count} {noun}"
-    # Build intro; include removal password if configured
-    intro_core = (
-        f"You have been granted one-time access to {count} {noun} in a photo vault."
-        f"<br>This link expires on: <strong>{expires_at_iso}</strong>"
-    )
+    # Resolve photographer/studio name from Firestore
+    studio_name = None
     try:
-        if rec.get("remove_pw_hash"):
-            intro_core += "<br><strong>Removal password</strong> (to unlock originals without invisible watermark): "
-            intro_core += f"<code>{(payload or {}).get('remove_password') or ''}</code>"
+        db = get_fs_client()
+        if db:
+            doc = db.collection('users').document(uid).get()
+            data = doc.to_dict() if getattr(doc, 'exists', False) else {}
+            studio_name = (
+                data.get('studioName')
+                or data.get('businessName')
+                or data.get('brand_name')
+                or data.get('name')
+                or data.get('displayName')
+            )
     except Exception:
-        pass
+        studio_name = None
+    if not studio_name:
+        try:
+            owner_email = (get_user_email_from_uid(uid) or '').strip()
+            studio_name = (owner_email.split('@')[0] if '@' in owner_email else owner_email) or os.getenv("APP_NAME", "Photomark")
+        except Exception:
+            studio_name = os.getenv("APP_NAME", "Photomark")
+
+    # Prepare formatted expiry in UTC
+    try:
+        exp_dt = datetime.fromisoformat(expires_at_iso.replace('Z', ''))
+    except Exception:
+        exp_dt = exp
+    expire_pretty = f"{exp_dt.strftime('%Y-%m-%d at %H:%M')} UTC"
+
+    subject = f"{studio_name} has shared photos for your review"
+
+    client_greeting = f"Hello {client_name}," if client_name else "Hello,"
+
+    body_html = (
+        f"{client_greeting}<br><br>"
+        f"{studio_name} has shared a set of photos with you to review and proof.<br><br>"
+        f"You have been granted one-time access to view {count} {noun} in a secure photo vault.<br><br>"
+        f"Click the link below to view your photos:<br>"
+        f"<a href=\"{link}\">{link}</a><br><br>"
+        f"This link will expire on: <strong>{expire_pretty}</strong>."
+    )
+
     html = render_email(
         "email_basic.html",
-        title="You've been granted access",
-        intro=intro_core,
-        button_label="Open vault",
+        title="Photos shared for your review",
+        intro=body_html,
+        button_label="View photos",
         button_url=link,
         footer_note="If you did not expect this email, you can ignore it.",
     )
-    text = f"Open this link to view the shared vault with {count} {noun} (expires {expires_at_iso}): {link}"
-    try:
-        if rec.get("remove_pw_hash"):
-            text += "\nRemoval password (to unlock originals without invisible watermark): "
-            text += str((payload or {}).get('remove_password') or '')
-    except Exception:
-        pass
+
+    text = (
+        (client_greeting.replace('<br>', '').replace('</br>', '').replace('<br/>', ''))
+        + "\n\n"
+        + f"{studio_name} has shared a set of photos with you to review and proof.\n\n"
+        + f"You have been granted one-time access to view {count} {noun} in a secure photo vault.\n\n"
+        + "Click the link below to view your photos:\n"
+        + f"{link}\n\n"
+        + f"This link will expire on: {expire_pretty}."
+    )
 
     sent = send_email_smtp(email, subject, html, text)
     if not sent:
