@@ -754,3 +754,136 @@ async def set_note(request: Request):
 
     write_json_key(meta_key, meta)
     return {"ok": True, "meta": meta}
+
+
+# ----------------------
+# Received list and send-back (retouch) endpoints
+# ----------------------
+
+@router.get("/received")
+async def list_received(request: Request, limit: int = 200):
+    """List images received by the current user in the special friends vault.
+    Returns minimal data: keys and optional meta flags useful for UI.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+
+    # Read vault json for FRIENDS_VAULT_NAME
+    try:
+        vkey = _vault_json_key(uid, FRIENDS_VAULT_NAME)
+        data = read_json_key(vkey) or {}
+        keys = [k for k in (data.get("keys") or []) if isinstance(k, str)]
+        # Newest last_modified isn't tracked here; return reversed last N for UX recency
+        keys = list(keys)[-limit:][::-1]
+        out = []
+        for k in keys:
+            try:
+                meta_key = f"{os.path.splitext(k)[0]}.json"
+                meta = read_json_key(meta_key) or {}
+            except Exception:
+                meta = {}
+            out.append({
+                "key": k,
+                "from": meta.get("from"),
+                "note": meta.get("note"),
+                "sent_back": bool(meta.get("sent_back_by_partner")),
+                "at": meta.get("at"),
+            })
+        return {"ok": True, "photos": out}
+    except Exception as ex:
+        logger.exception(f"collab.received failed: {ex}")
+        _friendly_err("Failed to list received items", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@router.post("/retouch/send-back")
+async def retouch_send_back(
+    request: Request,
+    original_key: str = Form(...),
+    file: UploadFile = File(...),
+    note: Optional[str] = Form(None),
+):
+    """Upload a retouched version for a received image and send back to the original sender's gallery.
+    Adds meta tag 'sent_back_by_partner' and notifies the sender by email.
+    """
+    partner_uid = get_uid_from_request(request)
+    if not partner_uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+
+    # Validate the original exists and find sender email
+    try:
+        data = read_bytes_key(original_key)
+        if not data:
+            _friendly_err("Original image not found", status.HTTP_404_NOT_FOUND)
+    except Exception:
+        _friendly_err("Original image not found", status.HTTP_404_NOT_FOUND)
+
+    meta_key = f"{os.path.splitext(original_key)[0]}.json"
+    meta = read_json_key(meta_key) or {}
+    sender_email = (meta.get("from") or "").strip().lower()
+    if not sender_email:
+        _friendly_err("Missing sender info; cannot send back")
+
+    sender_uid = get_uid_by_email(sender_email)
+    if not sender_uid:
+        _friendly_err("Original sender not found")
+
+    # Validate upload file
+    fname = file.filename or "image"
+    _validate_upload(fname, getattr(file, "size", 0) or 0)
+    raw = await file.read()
+    if not raw:
+        _friendly_err("Empty file")
+
+    # Re-encode to JPEG for gallery, store original ext separately
+    orig_ext = (os.path.splitext(fname)[1] or ".jpg").lower()
+    gallery_jpeg = _reencode_to_jpeg(raw)
+
+    date_prefix = _dt.utcnow().strftime('%Y/%m/%d')
+    base = os.path.splitext(os.path.basename(fname))[0][:100] or 'image'
+    stamp = int(_dt.utcnow().timestamp())
+
+    # Save 'returned' item into sender's gallery under a dedicated folder
+    oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
+    return_key = f"users/{sender_uid}/partners_returns/{date_prefix}/{base}-{stamp}-frompartner-o{oext_token}.jpg"
+    return_url = upload_bytes(return_key, gallery_jpeg, content_type='image/jpeg')
+
+    # Save meta marking it as sent back by partner
+    try:
+        ret_meta_key = f"{os.path.splitext(return_key)[0]}.json"
+        ret_meta: Dict[str, Any] = read_json_key(ret_meta_key) or {}
+        if not isinstance(ret_meta, dict):
+            ret_meta = {}
+        ret_meta["from"] = get_user_email_from_uid(partner_uid) or None
+        ret_meta["at"] = _dt.utcnow().isoformat()
+        ret_meta["sent_back_by_partner"] = True
+        ret_meta["reply_to_key"] = original_key
+        if note and str(note).strip():
+            ret_meta["note"] = str(note).strip()
+        write_json_key(ret_meta_key, ret_meta)
+    except Exception as ex:
+        logger.warning(f"collab: failed to write retouch meta for {return_key}: {ex}")
+
+    # Add to a special vault for visibility (optional)
+    try:
+        _add_to_vault(sender_uid, FRIENDS_VAULT_NAME, [return_key])
+    except Exception as ex:
+        logger.warning(f"collab: failed to add sent-back item to sender vault: {ex}")
+
+    # Notify original sender
+    try:
+        gallery_link = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip().rstrip("/") + "#gallery"
+        partner_email = get_user_email_from_uid(partner_uid) or "a collaborator"
+        html = render_email(
+            "email_basic.html",
+            title="A partner sent back a retouched photo",
+            intro=f"<p><b>{partner_email}</b> sent back a retouched version to your gallery.</p>" + (f"<p>Note: {note}</p>" if note else ""),
+            button_url=gallery_link,
+            button_label="Open your gallery",
+            footer_note="You can reply back from your gallery.",
+        )
+        send_email_smtp(sender_email, "Retouched photo received", html)
+    except Exception as ex:
+        logger.warning(f"Email notify failed (retouch send-back): {ex}")
+
+    return {"ok": True, "key": return_key, "url": return_url}
