@@ -414,11 +414,12 @@ async def pricing_webhook(request: Request):
         pass
 
     # --- Step 5: Extract metadata & query_params (overlay checkout) ---
-    meta = event_obj.get("metadata") if isinstance(event_obj, dict) else {}
-    meta = meta if isinstance(meta, dict) else {}
+    def _dict(d):
+        return d if isinstance(d, dict) else {}
+    payload_data = _dict(payload.get("data")) if isinstance(payload, dict) else {}
+    meta = _dict((event_obj or {}).get("metadata")) or _dict(payload_data.get("metadata")) or {}
     # Overlay Checkout passes identifiers under data.query_params
-    qp = event_obj.get("query_params") if isinstance(event_obj, dict) else {}
-    qp = qp if isinstance(qp, dict) else {}
+    qp = _dict((event_obj or {}).get("query_params")) or _dict(payload_data.get("query_params")) or {}
 
     # --- Step 6: Resolve UID ---
     uid = ""
@@ -474,7 +475,6 @@ async def pricing_webhook(request: Request):
                 "reference_id",
                 "external_id",
                 "order_id",
-                "customer_id",
             ),
         )
         if deep_uid:
