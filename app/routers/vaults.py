@@ -7,7 +7,7 @@ import zipfile
 import httpx
 import asyncio
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Body, UploadFile, File
+from fastapi import APIRouter, Request, Body, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -1796,6 +1796,112 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
             pass
         return {"ok": True}
     except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/vaults/retouch/final")
+async def retouch_upload_final(request: Request, id: str = Form(...), file: UploadFile = File(...)):
+    """Photographer uploads the final retouched version for a retouch request.
+    Overwrites the existing photo at the same key to preserve approvals/favorites and shared links.
+    Marks the retouch request as done and notifies the client.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    rid = (id or '').strip()
+    if not rid:
+        return JSONResponse({"error": "id required"}, status_code=400)
+    try:
+        items = _read_retouch_queue(uid)
+        found = None
+        for it in items:
+            if str(it.get("id") or "") == rid:
+                found = it
+                break
+        if not found:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        key = str(found.get("key") or "").strip()
+        vault = str(found.get("vault") or "").strip()
+        token = str(found.get("token") or "").strip()
+        if not key or not vault:
+            return JSONResponse({"error": "bad request"}, status_code=400)
+        # Validate membership in vault for safety
+        try:
+            keys = _read_vault(uid, vault)
+            if key not in keys:
+                return JSONResponse({"error": "photo not in vault"}, status_code=400)
+        except Exception:
+            pass
+        # Read upload bytes
+        data = await file.read()
+        if not data:
+            return JSONResponse({"error": "empty file"}, status_code=400)
+        # Infer content-type
+        name = file.filename or os.path.basename(key) or "image.jpg"
+        ext = os.path.splitext(name)[1].lower()
+        ct_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".heic": "image/heic",
+            ".tif": "image/tiff",
+            ".tiff": "image/tiff",
+        }
+        ct = ct_map.get(ext, "application/octet-stream")
+        # Overwrite object in-place so that existing keys/approvals remain intact
+        try:
+            upload_bytes(key, data, content_type=ct)
+        except Exception as ex:
+            logger.warning(f"retouch final upload failed for {key}: {ex}")
+            return JSONResponse({"error": "upload failed"}, status_code=500)
+        # Update queue status to done
+        try:
+            for it in items:
+                if str(it.get("id") or "") == rid:
+                    it["status"] = "done"
+                    it["updated_at"] = datetime.utcnow().isoformat()
+                    it["note"] = (it.get("note") or "")
+                    break
+            _write_retouch_queue(uid, items)
+            _touch_retouch_version(uid, vault)
+        except Exception:
+            pass
+        # Notify client (best-effort)
+        try:
+            client_email = (found.get("client_email") or "").strip()
+            if client_email:
+                photo_name = os.path.basename(key)
+                subject = f"Retouched photo ready — {photo_name}"
+                intro = (
+                    f"Your retouch request for <strong>{photo_name}</strong> in vault <strong>{vault}</strong> is now <strong>Done</strong>."
+                )
+                html = render_email(
+                    "email_basic.html",
+                    title="Retouched version uploaded",
+                    intro=intro,
+                    button_label="Open shared vault",
+                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + ("/#share?token=" + token if token else "/#share"),
+                )
+                text = f"Your retouched photo is ready: {photo_name} in vault {vault}."
+                try:
+                    send_email_smtp(client_email, subject, html, text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Respond with basic info
+        url = None
+        try:
+            if s3 and R2_BUCKET:
+                url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else None
+            else:
+                url = f"/static/{key}"
+        except Exception:
+            url = None
+        return {"ok": True, "key": key, "url": url}
+    except Exception as ex:
+        logger.warning(f"retouch_upload_final error: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
