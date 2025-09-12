@@ -38,6 +38,12 @@ SYSTEM_PROMPT = (
     "- remove_vault: { vault: string }  // Remove a vault definition (does not delete physical files).\n"
     "- download_vault: { vault: string, originals?: boolean }  // Provide download links for a vault.\n"
     "- download_photos: { vault?: string, names?: [string], contains?: string, limit?: number }  // Return direct download links for matching photos.\n"
+    "- search_photos: { query: string, vault?: string, limit?: number }  // Find photos by semantic/substring query (filename).\n"
+    "- get_info: {}  // Summarize user library: counts, vaults.\n"
+    "- list_vaults: {}  // List vaults and counts.\n"
+    "- open_vault: { vault: string }  // Hint UI to open a vault.\n"
+    "- set_query: { query: string }  // Hint UI to filter by text.\n"
+    "- set_tab: { tab: string }  // Hint UI to switch tab (gallery|uploads|vaults).\n"
     "Keep reply concise and confirm what will be done."
 )
 
@@ -117,6 +123,39 @@ async def _list_photos(uid: str, vault: str | None = None) -> List[Dict[str, Any
                         "size": os.path.getsize(local_path) if os.path.exists(local_path) else 0,
                     })
     return items
+
+async def _list_vaults(uid: str) -> List[Dict[str, Any]]:
+    """List vault names and counts. Mimics /vaults endpoint logic (top-level JSON files)."""
+    results: List[Dict[str, Any]] = []
+    prefix = f"users/{uid}/vaults/"
+    names: List[str] = []
+    try:
+        if s3 and R2_BUCKET:
+            bucket = s3.Bucket(R2_BUCKET)
+            for obj in bucket.objects.filter(Prefix=prefix):
+                key = obj.key
+                if not key.endswith('.json'):
+                    continue
+                tail = key[len(prefix):]
+                if "/" in tail:
+                    continue
+                base = os.path.basename(key)[:-5]
+                names.append(base)
+        else:
+            dir_path = os.path.join(static_dir, prefix)
+            if os.path.isdir(dir_path):
+                for f in os.listdir(dir_path):
+                    if f.endswith('.json'):
+                        names.append(f[:-5])
+        for n in sorted(set(names)):
+            try:
+                count = len(_read_vault(uid, n))
+            except Exception:
+                count = 0
+            results.append({"name": n, "count": count})
+    except Exception:
+        pass
+    return results
 
 async def _delete_keys(uid: str, keys: List[str]) -> Dict[str, List[str]]:
     deleted: List[str] = []
@@ -324,6 +363,52 @@ async def chat(request: Request, body: Dict[str, Any]):
                     # Build direct API download links for each key
                     links = [f"/api/photos/download/{it['key']}" for it in sel if it.get('key')]
                     executed["download_links"] = links
+                elif op == "search_photos":
+                    query = str(args.get("query") or "").strip()
+                    vault = str(args.get("vault") or "").strip()
+                    limit = int(args.get("limit") or 100)
+                    if photos_cache is None:
+                        photos_cache = await _list_photos(eff_uid, vault=vault or None)
+                    pool = photos_cache or []
+                    ql = query.lower()
+                    sel = [it for it in pool if (ql in (it.get("name") or "").lower() or ql in (it.get("key") or "").lower())]
+                    sel = sel[: max(0, min(200, limit))]
+                    executed["search"] = {
+                        "query": query,
+                        "vault": vault or None,
+                        "results": [{"key": it.get("key"), "name": it.get("name"), "url": it.get("url")} for it in sel],
+                        "count": len(sel),
+                    }
+                elif op == "get_info":
+                    try:
+                        total = len(await _list_photos(eff_uid))
+                    except Exception:
+                        total = 0
+                    try:
+                        vaults = await _list_vaults(eff_uid)
+                    except Exception:
+                        vaults = []
+                    executed["info"] = {"total_photos": total, "vaults": vaults, "vault_count": len(vaults)}
+                elif op == "list_vaults":
+                    try:
+                        executed["vaults"] = await _list_vaults(eff_uid)
+                    except Exception:
+                        executed["vaults"] = []
+                elif op == "open_vault":
+                    vname = str(args.get("vault") or "").strip()
+                    ui = executed.get("ui") or {}
+                    ui["open_vault"] = vname
+                    executed["ui"] = ui
+                elif op == "set_query":
+                    q = str(args.get("query") or "").strip()
+                    ui = executed.get("ui") or {}
+                    ui["set_query"] = q
+                    executed["ui"] = ui
+                elif op == "set_tab":
+                    t = str(args.get("tab") or "").strip().lower()
+                    ui = executed.get("ui") or {}
+                    ui["set_tab"] = t
+                    executed["ui"] = ui
         # Heuristic fallback if model didn't output a command
         if not executed["deleted"]:
             utext = (raw_msgs[0] or {}).get("content") if isinstance(raw_msgs[0], dict) else ""
