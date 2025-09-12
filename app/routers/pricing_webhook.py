@@ -421,6 +421,7 @@ async def pricing_webhook(request: Request):
     qp = qp if isinstance(qp, dict) else {}
 
     # --- Step 6: Resolve UID ---
+    uid = ""
     # Prefer query_params for overlay integration
     qp_uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
     for k in qp_uid_keys:
@@ -431,7 +432,6 @@ async def pricing_webhook(request: Request):
     # Fallback to metadata if not found in query_params
     uid_keys = ("user_uid", "userUid", "uid", "userId", "user-id")
     if not uid:
-        uid = ""
         for k in uid_keys:
             v = str((meta.get(k) if isinstance(meta, dict) else "") or "").strip()
             if v:
