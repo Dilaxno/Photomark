@@ -354,8 +354,9 @@ async def vaults_list(request: Request):
                 key = obj.key
                 if not key.endswith(".json"):
                     continue
-                # Skip files inside the _meta directory
-                if key.startswith(prefix + "_meta/"):
+                # Only consider top-level vault JSON files; skip subdirectories like _meta/, _approvals/, etc.
+                tail = key[len(prefix):]
+                if "/" in tail:
                     continue
                 base = os.path.basename(key)[:-5]
                 names.append(base)
@@ -1306,6 +1307,33 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
         retouch = {"by_photo": per_photo}
     except Exception:
         retouch = {}
+
+    # Cache-bust image URLs for clients when a retouch update exists (avoid stale CDN/browser cache)
+    try:
+        vmap = retouch.get("by_photo", {}) if isinstance(retouch, dict) else {}
+        if isinstance(vmap, dict) and vmap:
+            import re
+            for it in items:
+                try:
+                    k = it.get("key") or ""
+                    r = vmap.get(k) or {}
+                    ts = str(r.get("updated_at") or "").strip()
+                    if not ts:
+                        continue
+                    v = re.sub(r"[^0-9]", "", ts)[:14] or str(int(datetime.utcnow().timestamp()))
+                    def _bust(u: str) -> str:
+                        if not isinstance(u, str) or not u:
+                            return u
+                        sep = '&' if '?' in u else '?'
+                        return f"{u}{sep}v={v}"
+                    if it.get("url"):
+                        it["url"] = _bust(it["url"])
+                    if it.get("original_url"):
+                        it["original_url"] = _bust(it["original_url"])
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
 
