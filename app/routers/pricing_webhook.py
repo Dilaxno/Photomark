@@ -365,10 +365,8 @@ async def pricing_webhook(request: Request):
             logger.warning(f"[pricing.webhook] invalid JSON: {ex}")
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
-    # --- Step 3: Event type check ---
+    # --- Step 3: Event type ---
     evt_type = str((payload.get("type") or payload.get("event") or "")).strip().lower()
-    if evt_type != "payment.succeeded":
-        return {"ok": True, "ignored": True, "reason": "unexpected_event_type", "event_type": evt_type}
 
     # --- Step 4: Normalize event object ---
     event_obj = None
@@ -505,9 +503,67 @@ async def pricing_webhook(request: Request):
     plan_raw = str((qp.get("plan") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
     plan = _normalize_plan(plan_raw)
 
+    # --- Step 7b: Capture and cache any available context for later payment.succeeded ---
+    ctx = {"uid": uid, "plan": plan, "email": _first_email_from_payload(payload) or _first_email_from_payload(event_obj or {})}
+    customer_id = ""
+    try:
+        cust = event_obj.get("customer") if isinstance(event_obj, dict) else None
+        if isinstance(cust, dict):
+            customer_id = str((cust.get("customer_id") or cust.get("id") or "")).strip()
+    except Exception:
+        pass
+    sub_id = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
+    # Write lightweight cache entries when we have any meaningful context
+    try:
+        def _write_ctx(key: str):
+            if not key:
+                return
+            write_json_key(f"pricing/cache/{key}.json", {
+                "uid": ctx.get("uid") or None,
+                "plan": ctx.get("plan") or None,
+                "email": ctx.get("email") or None,
+                "updatedAt": int(datetime.utcnow().timestamp()),
+            })
+        if ctx.get("uid") or ctx.get("plan") or ctx.get("email"):
+            if sub_id:
+                _write_ctx(f"subscriptions/{sub_id}")
+            if customer_id:
+                _write_ctx(f"customers/{customer_id}")
+            if ctx.get("email"):
+                _write_ctx(f"emails/{(ctx['email'] or '').lower()}")
+    except Exception:
+        pass
+
+    # If this is not a payment.succeeded, acknowledge after caching
+    if evt_type != "payment.succeeded":
+        return {"ok": True, "captured": bool(ctx.get("uid") or ctx.get("plan") or ctx.get("email")), "event_type": evt_type}
+
     # Detect subscription-style payloads which may not include product_cart
     sub_id = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
     is_subscription = bool(sub_id and not (isinstance(event_obj.get("product_cart"), list) and event_obj.get("product_cart")))
+
+    # If uid/plan missing, try reading cached context by subscription/customer/email
+    if (not uid or not plan):
+        try:
+            def _read_ctx(key: str) -> dict:
+                try:
+                    return read_json_key(f"pricing/cache/{key}.json") or {}
+                except Exception:
+                    return {}
+            if sub_id and (not uid or not plan):
+                c1 = _read_ctx(f"subscriptions/{sub_id}")
+                uid = uid or str(c1.get("uid") or "").strip()
+                plan = plan or _normalize_plan(str(c1.get("plan") or ""))
+            if (not uid or not plan) and customer_id:
+                c2 = _read_ctx(f"customers/{customer_id}")
+                uid = uid or str(c2.get("uid") or "").strip()
+                plan = plan or _normalize_plan(str(c2.get("plan") or ""))
+            if (not uid or not plan) and ctx.get("email"):
+                c3 = _read_ctx(f"emails/{(ctx.get('email') or '').lower()}")
+                uid = uid or str(c3.get("uid") or "").strip()
+                plan = plan or _normalize_plan(str(c3.get("plan") or ""))
+        except Exception:
+            pass
 
     if not plan and is_subscription:
         # Try mapping subscription_id to plan via env; otherwise use metadata plan or default to photographers

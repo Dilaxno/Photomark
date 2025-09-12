@@ -226,6 +226,20 @@ async def create_pricing_link(request: Request):
 
     link, details = await create_checkout_link(alt_payloads)
     if link:
+        # Persist lightweight context so webhook can recover uid/plan if provider omits metadata
+        try:
+            from app.utils.storage import write_json_key
+            code = link.rsplit('/', 1)[-1]
+            write_json_key(
+                f"pricing/cache/links/{code}.json",
+                {
+                    "uid": uid,
+                    "plan": plan,
+                    "email": _get_user_email(uid),
+                },
+            )
+        except Exception:
+            pass
         return {"url": link, "product_id": product_id, "link_kind": "url"}
     logger.warning(f"[pricing.link] failed to create payment link: {details}")
     return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
