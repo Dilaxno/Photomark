@@ -7,7 +7,7 @@ botocore==1.35.20
 python-dotenv==1.0.1
 firebase-admin==6.6.0
 httpx==0.28.1
-websockets==14.0.2
+websockets==14.2
 Wand==0.6.13
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
