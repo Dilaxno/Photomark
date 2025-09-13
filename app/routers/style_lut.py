@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, Request
+
 from starlette.responses import StreamingResponse
 from typing import Optional, Tuple, List, Dict, Any
 import io
@@ -11,9 +12,14 @@ import torch.nn.functional as F
 
 # PyLUT for generating .cube files from programmatic transforms
 try:
+    # Newer versions publish as PyLUT with class LUT3D in pylut
     from pylut import LUT3D
 except Exception:
-    LUT3D = None  # handled at runtime
+    try:
+        # Some environments expose it under pylut.lut
+        from pylut.lut import LUT3D  # type: ignore
+    except Exception:
+        LUT3D = None  # handled at runtime
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
@@ -240,6 +246,30 @@ def _apply_settings_to_rgb(r: float, g: float, b: float, s: Dict[str, Any]) -> T
     return r, g, b
 
 
+def _build_lut_volume_from_settings(settings: Dict[str, Any], size: int = 33) -> Tuple[np.ndarray, Tuple[float, float, float], Tuple[float, float, float]]:
+    """
+    Build a 3D LUT volume [S,S,S,3] in 0..1 by evaluating _apply_settings_to_rgb
+    at grid points in RGB domain [0..1]. Returns (volume, domain_min, domain_max).
+    """
+    try:
+        s = int(settings.get('resolution') or size)
+        size = s if s in (17, 33, 65) else size
+    except Exception:
+        size = size
+    vol = np.zeros((size, size, size, 3), dtype=np.float32)
+    # Grid over 0..1 inclusive
+    grid = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    # Iterate over grid; small sizes keep this acceptable
+    for ri, r in enumerate(grid):
+        for gi, g in enumerate(grid):
+            for bi, b in enumerate(grid):
+                rr, gg, bb = _apply_settings_to_rgb(float(r), float(g), float(b), settings)
+                vol[ri, gi, bi, 0] = rr
+                vol[ri, gi, bi, 1] = gg
+                vol[ri, gi, bi, 2] = bb
+    return vol, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
+
+
 @router.post('/lut-apply')
 async def lut_apply(
     request: Request,
@@ -337,4 +367,56 @@ async def lut_generate(request: Request, payload: Dict[str, Any]):
         return StreamingResponse(buf, media_type='text/plain', headers=headers)
     except Exception as ex:
         logger.exception(f"LUT generate failed: {ex}")
+        return {"error": str(ex)}
+
+
+@router.post('/lut/preview')
+@router.post('/lut/preview-image')
+async def lut_preview(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
+    settings: UploadFile = File(...),
+):
+    """
+    Server-side preview: apply the UI settings directly to an uploaded image.
+    Accepts multipart form-data with fields:
+      - file or image: the image to preview
+      - settings: a JSON blob containing the settings (same schema as generate)
+    Returns a PNG image.
+    """
+    try:
+        # Parse settings JSON (sent as a Blob part)
+        raw_settings = await settings.read()
+        try:
+            import json as _json
+            payload = _json.loads(raw_settings.decode('utf-8', errors='ignore')) if raw_settings else {}
+        except Exception:
+            payload = {}
+
+        # Pick the image file
+        img_part = file or image
+        if not img_part:
+            return {"error": "no_image", "message": "Upload an image as 'file' or 'image'"}
+        img_bytes = await img_part.read()
+        if not img_bytes:
+            return {"error": "empty_image"}
+
+        # Open image
+        img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+
+        # Build a temporary LUT volume from settings and apply via GPU/CPU sampler
+        vol_np, dmin, dmax = _build_lut_volume_from_settings(payload, int(payload.get('resolution') or 33))
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        vol_th, dm_th, dM_th = to_torch_lut(vol_np, torch.tensor(dmin), torch.tensor(dmax), device)
+        out = apply_lut_gpu(img, vol_th, dm_th, dM_th, strength=1.0, device=device)
+
+        # Encode PNG
+        buf = io.BytesIO()
+        out.save(buf, format='PNG')
+        buf.seek(0)
+        headers = {"Access-Control-Expose-Headers": "Content-Disposition"}
+        return StreamingResponse(buf, media_type='image/png', headers=headers)
+    except Exception as ex:
+        logger.exception(f"LUT preview failed: {ex}")
         return {"error": str(ex)}
