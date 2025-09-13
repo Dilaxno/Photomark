@@ -14,29 +14,19 @@ numpy==1.26.4
 jinja2==3.1.4
 google-auth==2.34.0
 
-# ML / CV (keep only if used)
-onnxruntime==1.18.1
+# ML / CV (only those actually used)
 PyJWT==2.9.0
 bcrypt==4.2.0
-scikit-image==0.22.0
 torch==2.8.0
 kornia==0.7.3
-transformers==4.44.2
-rawpy==0.18.1
 
 # LUT generation
 PyLUT==1.4.9
-
-diffusers==0.30.3
-safetensors==0.4.4
-# Optional but recommended for performance/inference configs:
-accelerate==0.33.0
 
 # Copyright Defense Dependencies
 pydantic[email]==2.8.2
 cryptography==42.0.8
 
+# Utilities used by scripts and webhooks
 gdown==5.2.0
 standardwebhooks==1.0.0
-google-genai==1.5.0
-lensfunpy==1.11.1
