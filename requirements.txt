@@ -39,4 +39,4 @@ cryptography==42.0.8
 gdown==5.2.0
 standardwebhooks==1.0.0
 google-genai==1.5.0
-lensfunpy==1.11.0
+lensfunpy==1.11.1
