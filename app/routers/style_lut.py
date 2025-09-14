@@ -1,22 +1,18 @@
 from fastapi import APIRouter, UploadFile, File, Form, Request
-
 from starlette.responses import StreamingResponse
 from typing import Optional, Tuple, List, Dict, Any
 import io
-import os
 
 import numpy as np
 from PIL import Image
 import torch
 import torch.nn.functional as F
 
-# PyLUT for generating .cube files from programmatic transforms
+# Optional: PyLUT for generating .cube files from programmatic transforms
 try:
-    # Newer versions publish as PyLUT with class LUT3D in pylut
-    from pylut import LUT3D
+    from pylut import LUT3D  # type: ignore
 except Exception:
     try:
-        # Some environments expose it under pylut.lut
         from pylut.lut import LUT3D  # type: ignore
     except Exception:
         LUT3D = None  # handled at runtime
@@ -27,7 +23,10 @@ from app.utils.storage import read_json_key, write_json_key
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # includes /lut-apply and /lut/generate
 
-# ---- One-free-generation helpers ----
+
+# -----------------------------
+# Billing helpers (one-free usage)
+# -----------------------------
 from datetime import datetime as _dt
 
 def _billing_uid_from_request(request: Request) -> str:
@@ -72,10 +71,18 @@ def _consume_one_free(uid: str, tool: str) -> bool:
     return True
 
 
+# -----------------------------
+# .cube parsing / LUT helpers
+# -----------------------------
+
 def parse_cube_lut(text: str) -> Tuple[np.ndarray, Tuple[float, float, float], Tuple[float, float, float]]:
     """
-    Parse .cube (3D LUT) text into a numpy array of shape [S, S, S, 3] with values in 0..1,
-    along with DOMAIN_MIN and DOMAIN_MAX.
+    Parse a .cube (3D LUT) text into:
+      - volume: numpy array of shape [S, S, S, 3] with values in [0,1]
+      - domain_min: (r_min, g_min, b_min)
+      - domain_max: (r_max, g_max, b_max)
+
+    Assumes data order is R-major, then G, then B as commonly used by .cube files.
     """
     lines = [l.strip() for l in text.splitlines()]
     lines = [l for l in lines if l and not l.startswith('#')]
@@ -83,22 +90,22 @@ def parse_cube_lut(text: str) -> Tuple[np.ndarray, Tuple[float, float, float], T
     size = 0
     domain_min = (0.0, 0.0, 0.0)
     domain_max = (1.0, 1.0, 1.0)
-    values = []
+    values: List[List[float]] = []
 
     for line in lines:
         if line.startswith('TITLE'):
             continue
-        if line.startswith('LUT_3D_SIZE'):
+        if line.upper().startswith('LUT_3D_SIZE'):
             parts = line.split()
             if len(parts) >= 2:
-                size = int(parts[1])
+                size = int(float(parts[1]))
             continue
-        if line.startswith('DOMAIN_MIN'):
+        if line.upper().startswith('DOMAIN_MIN'):
             parts = line.split()
             if len(parts) >= 4:
                 domain_min = (float(parts[1]), float(parts[2]), float(parts[3]))
             continue
-        if line.startswith('DOMAIN_MAX'):
+        if line.upper().startswith('DOMAIN_MAX'):
             parts = line.split()
             if len(parts) >= 4:
                 domain_max = (float(parts[1]), float(parts[2]), float(parts[3]))
@@ -115,60 +122,107 @@ def parse_cube_lut(text: str) -> Tuple[np.ndarray, Tuple[float, float, float], T
         raise ValueError(f'Invalid LUT data length: got {len(values)}, expected {expected}')
 
     arr = np.asarray(values, dtype=np.float32)
-    arr = arr.reshape((size, size, size, 3))  # Assume order R-major then G then B as common in .cube
+    arr = arr.reshape((size, size, size, 3))  # [R, G, B, 3]
+
+    # Clamp just in case
+    np.clip(arr, 0.0, 1.0, out=arr)
     return arr, domain_min, domain_max
 
 
-def to_torch_lut(volume: np.ndarray, domain_min: Tuple[float, float, float], domain_max: Tuple[float, float, float], device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def to_torch_lut(
+    volume: np.ndarray,
+    domain_min: Tuple[float, float, float] | torch.Tensor,
+    domain_max: Tuple[float, float, float] | torch.Tensor,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Convert LUT numpy volume [S,S,S,3] to torch tensor [1,3,S,S,S] and provide min/max for mapping.
+    Convert LUT numpy volume [S,S,S,3] to a torch tensor [1,3,S,S,S] (N,C,D,H,W)
+    and return (lut_volume, domain_min_tensor, domain_max_tensor).
+
+    Convention used here:
+      - The three spatial axes (D,H,W) correspond to (R,G,B) respectively.
+      - grid_sample for 5D expects grid[..., (x,y,z)] mapping to (W,H,D) = (B,G,R).
     """
-    # Rearrange to [C,D,H,W] after setting D=R, H=G, W=B
-    vol_th = torch.from_numpy(volume).to(device)  # [S,S,S,3]
+    vol_th = torch.from_numpy(volume).to(device=device, dtype=torch.float32)  # [S,S,S,3]
     vol_th = vol_th.permute(3, 0, 1, 2).contiguous()  # [3,S,S,S]
     vol_th = vol_th.unsqueeze(0)  # [1,3,S,S,S]
-    dm = torch.tensor(domain_min, dtype=torch.float32, device=device)
-    dM = torch.tensor(domain_max, dtype=torch.float32, device=device)
+
+    # Avoid warnings: if input is already a tensor, just .to() it.
+    if isinstance(domain_min, torch.Tensor):
+        dm = domain_min.to(device=device, dtype=torch.float32)
+    else:
+        dm = torch.tensor(domain_min, device=device, dtype=torch.float32)
+    if isinstance(domain_max, torch.Tensor):
+        dM = domain_max.to(device=device, dtype=torch.float32)
+    else:
+        dM = torch.tensor(domain_max, device=device, dtype=torch.float32)
+
     return vol_th, dm, dM
 
 
-def apply_lut_gpu(img: Image.Image, lut_volume: torch.Tensor, domain_min: torch.Tensor, domain_max: torch.Tensor, strength: float, device: torch.device) -> Image.Image:
+def apply_lut_image(
+    img: Image.Image,
+    lut_volume: torch.Tensor,
+    domain_min: torch.Tensor,
+    domain_max: torch.Tensor,
+    strength: float,
+    device: torch.device,
+) -> Image.Image:
+    """
+    Apply a 3D LUT to an image using grid_sample. Works on CPU or GPU.
+
+    Args:
+      - img: PIL RGB image
+      - lut_volume: [1,3,S,S,S]
+      - domain_min/domain_max: tensors shaped [3]
+      - strength: blend between original and LUT-applied result
+      - device: torch.device("cuda"/"cpu")
+    """
     if img.mode != 'RGB':
         img = img.convert('RGB')
+
     np_img = np.asarray(img, dtype=np.float32) / 255.0  # [H,W,3]
     h, w = np_img.shape[:2]
 
-    # To torch [1,3,H,W]
-    th_img = torch.from_numpy(np_img).to(device)
-    th_img = th_img.permute(2, 0, 1).unsqueeze(0)  # [1,3,H,W]
+    # [1,3,H,W]
+    th_img = torch.from_numpy(np_img).to(device=device, dtype=torch.float32)
+    th_img = th_img.permute(2, 0, 1).unsqueeze(0)
 
-    # Build 3D grid [1,H,W,3] in LUT index space normalized to [-1,1]
-    # Map RGB from DOMAIN_MIN..DOMAIN_MAX -> 0..1 -> [-1,1]
+    # Normalize RGB into [0,1] within DOMAIN_MIN..DOMAIN_MAX, then map to [-1,1]
+    rgb = th_img.permute(0, 2, 3, 1)  # [1,H,W,3]
     dm = domain_min.view(1, 1, 1, 3)
     dM = domain_max.view(1, 1, 1, 3)
-    rgb = th_img.permute(0, 2, 3, 1)  # [1,H,W,3]
     rgb_norm = torch.clamp((rgb - dm) / torch.clamp(dM - dm, min=1e-6), 0.0, 1.0)
-    grid = rgb_norm * 2.0 - 1.0  # [-1,1]
 
-    # grid_sample expects input [N,C,D,H,W] and grid [N, outD, outH, outW, 3]
-    # We want output size [H,W] sampled from LUT volume [S,S,S]
-    # So outD=H, outH=W, outW=1 is NOT correct. Instead, use trick: use grid_sample with 5D but provide a 2D grid by unsqueezing one dim
-    # Easiest is to reshape to [1,H,W,3] and use F.grid_sample with 5D by unsqueezing a dummy dimension.
-    # Create dummy depth dimension of size 1 and sample with grid of shape [1,1,H,W,3]
-    grid5d = grid.unsqueeze(1)  # [1,1,H,W,3]
-    # Sample
-    sampled = F.grid_sample(lut_volume, grid5d, mode='bilinear', padding_mode='border', align_corners=True)  # [1,3,1,H,W]
+    # Build 5D grid for sampling the LUT volume (N,C,D,H,W) with grid (N,D_out,H_out,W_out,3)
+    # Our convention maps (D,H,W) <- (R,G,B), so grid[..., (x,y,z)] = (B,G,R)
+    grid5d = torch.empty((1, 1, h, w, 3), device=device, dtype=th_img.dtype)
+    grid5d[..., 0] = rgb_norm[..., 2] * 2.0 - 1.0  # x (W) <- B
+    grid5d[..., 1] = rgb_norm[..., 1] * 2.0 - 1.0  # y (H) <- G
+    grid5d[..., 2] = rgb_norm[..., 0] * 2.0 - 1.0  # z (D) <- R
+
+    sampled = F.grid_sample(
+        lut_volume,
+        grid5d,
+        mode='bilinear',
+        padding_mode='border',
+        align_corners=True,
+    )  # [1,3,1,H,W]
     sampled = sampled.squeeze(2)  # [1,3,H,W]
 
     k = float(max(0.0, min(1.0, strength)))
-    out = th_img + (sampled - th_img) * k  # [1,3,H,W]
+    out = th_img.lerp(sampled, k)  # [1,3,H,W]
     out = torch.clamp(out, 0.0, 1.0)
+
     out_np = (out.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype(np.uint8)
     return Image.fromarray(out_np, mode='RGB')
 
 
+# -----------------------------
+# Settings -> LUT helpers (for generation/preview)
+# -----------------------------
+
 def _eval_curve(points: List[Dict[str, float]], x: float) -> float:
-    # Linear interpolation between sorted points
     if not points:
         return x
     pts = sorted(points, key=lambda p: p['x'])
@@ -176,11 +230,11 @@ def _eval_curve(points: List[Dict[str, float]], x: float) -> float:
         return pts[0]['y']
     if x >= pts[-1]['x']:
         return pts[-1]['y']
-    for i in range(len(pts)-1):
-        a, b = pts[i], pts[i+1]
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
         if a['x'] <= x <= b['x']:
             t = (x - a['x']) / max(1e-6, (b['x'] - a['x']))
-            return a['y'] * (1-t) + b['y'] * t
+            return a['y'] * (1 - t) + b['y'] * t
     return x
 
 
@@ -188,26 +242,30 @@ def _apply_settings_to_rgb(r: float, g: float, b: float, s: Dict[str, Any]) -> T
     # exposure (EV)
     k_exp = 2.0 ** float(s.get('exposure', 0.0))
     r *= k_exp; g *= k_exp; b *= k_exp
-    # contrast
+
+    # contrast around mid-grey 0.5
     c = float(s.get('contrast', 1.0))
     r = 0.5 + (r - 0.5) * c
     g = 0.5 + (g - 0.5) * c
     b = 0.5 + (b - 0.5) * c
+
     # gamma
     gamma = max(0.01, float(s.get('gamma', 1.0)))
-    r = r ** (1.0 / gamma); g = g ** (1.0 / gamma); b = b ** (1.0 / gamma)
-    # hue/sat/vibrance (simple HSV-like approx)
+    inv_g = 1.0 / gamma
+    r = r ** inv_g; g = g ** inv_g; b = b ** inv_g
+
+    # HSV-like hue/sat/vibrance approximation via HSL
     hue = float(s.get('hue', 0.0))
     sat = float(s.get('saturation', 1.0))
     vib = float(s.get('vibrance', 1.0))
-    # convert to HSL
-    mx, mn = max(r,g,b), min(r,g,b)
+
+    mx, mn = max(r, g, b), min(r, g, b)
     l = (mx + mn) / 2.0
     d = mx - mn
     if d == 0:
         h = 0.0; s_hsl = 0.0
     else:
-        s_hsl = d / (1 - abs(2*l - 1) + 1e-6)
+        s_hsl = d / (1 - abs(2 * l - 1) + 1e-6)
         if mx == r:
             h = ((g - b) / (d + 1e-6)) % 6
         elif mx == g:
@@ -215,30 +273,42 @@ def _apply_settings_to_rgb(r: float, g: float, b: float, s: Dict[str, Any]) -> T
         else:
             h = (r - g) / (d + 1e-6) + 4
         h *= 60
-    # apply hue
+
+    # apply hue shift
     h = (h + hue) % 360
-    # apply sat/vibrance (vibrance boosts more when saturation is low)
+
+    # apply saturation/vibrance (vibrance boosts more when saturation is low)
     s_boost = sat * (1 + (vib - 1) * (1 - s_hsl))
     s_hsl = max(0.0, min(1.0, s_hsl * s_boost))
+
     # back to RGB
-    c_h = (1 - abs(2*l - 1)) * s_hsl
-    x_h = c_h * (1 - abs(((h/60) % 2) - 1))
-    m = l - c_h/2
-    rp=gp=bp=0.0
-    if 0<=h<60: rp=c_h; gp=x_h; bp=0
-    elif 60<=h<120: rp=x_h; gp=c_h; bp=0
-    elif 120<=h<180: rp=0; gp=c_h; bp=x_h
-    elif 180<=h<240: rp=0; gp=x_h; bp=c_h
-    elif 240<=h<300: rp=x_h; gp=0; bp=c_h
-    else: rp=c_h; gp=0; bp=x_h
+    c_h = (1 - abs(2 * l - 1)) * s_hsl
+    x_h = c_h * (1 - abs(((h / 60) % 2) - 1))
+    m = l - c_h / 2
+
+    if 0 <= h < 60:
+        rp, gp, bp = c_h, x_h, 0.0
+    elif 60 <= h < 120:
+        rp, gp, bp = x_h, c_h, 0.0
+    elif 120 <= h < 180:
+        rp, gp, bp = 0.0, c_h, x_h
+    elif 180 <= h < 240:
+        rp, gp, bp = 0.0, x_h, c_h
+    elif 240 <= h < 300:
+        rp, gp, bp = x_h, 0.0, c_h
+    else:
+        rp, gp, bp = c_h, 0.0, x_h
+
     r = rp + m; g = gp + m; b = bp + m
+
     # curves
     curves = s.get('curves', {})
-    r = _eval_curve(curves.get('r', [{'x':0,'y':0},{'x':1,'y':1}]), r)
-    g = _eval_curve(curves.get('g', [{'x':0,'y':0},{'x':1,'y':1}]), g)
-    b = _eval_curve(curves.get('b', [{'x':0,'y':0},{'x':1,'y':1}]), b)
-    mcurve = curves.get('master', [{'x':0,'y':0},{'x':1,'y':1}])
+    r = _eval_curve(curves.get('r', [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}]), r)
+    g = _eval_curve(curves.get('g', [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}]), g)
+    b = _eval_curve(curves.get('b', [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}]), b)
+    mcurve = curves.get('master', [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}])
     r = _eval_curve(mcurve, r); g = _eval_curve(mcurve, g); b = _eval_curve(mcurve, b)
+
     # clamp
     r = float(max(0.0, min(1.0, r)))
     g = float(max(0.0, min(1.0, g)))
@@ -248,18 +318,18 @@ def _apply_settings_to_rgb(r: float, g: float, b: float, s: Dict[str, Any]) -> T
 
 def _build_lut_volume_from_settings(settings: Dict[str, Any], size: int = 33) -> Tuple[np.ndarray, Tuple[float, float, float], Tuple[float, float, float]]:
     """
-    Build a 3D LUT volume [S,S,S,3] in 0..1 by evaluating _apply_settings_to_rgb
-    at grid points in RGB domain [0..1]. Returns (volume, domain_min, domain_max).
+    Build a 3D LUT volume [S,S,S,3] in [0,1] by evaluating _apply_settings_to_rgb
+    across a uniform grid in [0,1]^3. Returns (volume, domain_min, domain_max).
     """
     try:
         s = int(settings.get('resolution') or size)
         size = s if s in (17, 33, 65) else size
     except Exception:
         size = size
+
     vol = np.zeros((size, size, size, 3), dtype=np.float32)
-    # Grid over 0..1 inclusive
     grid = np.linspace(0.0, 1.0, size, dtype=np.float32)
-    # Iterate over grid; small sizes keep this acceptable
+
     for ri, r in enumerate(grid):
         for gi, g in enumerate(grid):
             for bi, b in enumerate(grid):
@@ -267,8 +337,13 @@ def _build_lut_volume_from_settings(settings: Dict[str, Any], size: int = 33) ->
                 vol[ri, gi, bi, 0] = rr
                 vol[ri, gi, bi, 1] = gg
                 vol[ri, gi, bi, 2] = bb
+
     return vol, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
 
+
+# -----------------------------
+# API routes
+# -----------------------------
 
 @router.post('/lut-apply')
 async def lut_apply(
@@ -282,7 +357,7 @@ async def lut_apply(
     """Apply a provided .cube LUT to an image using GPU if available, CPU otherwise.
     Returns the processed image as PNG/JPEG.
     """
-    # AuthN/AuthZ similar to convert endpoint
+    # Auth
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return {"error": "Unauthorized"}
@@ -307,7 +382,7 @@ async def lut_apply(
         vol_np, dmin, dmax = parse_cube_lut(lut_text)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         vol_th, dm_th, dM_th = to_torch_lut(vol_np, dmin, dmax, device)
-        out = apply_lut_gpu(img, vol_th, dm_th, dM_th, float(intensity), device)
+        out = apply_lut_image(img, vol_th, dm_th, dM_th, float(intensity), device)
 
         buf = io.BytesIO()
         f = (fmt or 'png').lower()
@@ -330,9 +405,10 @@ async def lut_apply(
 async def lut_generate(request: Request, payload: Dict[str, Any]):
     """
     Generate a .cube LUT from UI settings using PyLUT and return as a downloadable file.
-    Expects payload with keys: resolution, exposure, contrast, gamma, hue, saturation, vibrance, curves{r,g,b,master}.
+    Expects payload with keys: resolution, exposure, contrast, gamma, hue, saturation,
+    vibrance, curves{r,g,b,master}.
     """
-    # AuthN/AuthZ similar to convert endpoint
+    # Auth
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return {"error": "Unauthorized"}
@@ -350,14 +426,13 @@ async def lut_generate(request: Request, payload: Dict[str, Any]):
 
     try:
         size = int(payload.get('resolution') or 33)
-        size = size if size in (17,33,65) else 33
-        # Create identity LUT
-        # LUT3D.from_func expects a mapping function f(r,g,b)->(r,g,b) over [0..1]
+        size = size if size in (17, 33, 65) else 33
+
         def map_fn(r: float, g: float, b: float):
             rr, gg, bb = _apply_settings_to_rgb(float(r), float(g), float(b), payload)
             return rr, gg, bb
+
         lut = LUT3D.from_func(size=size, func=map_fn)
-        # Serialize to .cube text
         cube_text = lut.to_cube()
         buf = io.BytesIO(cube_text.encode('utf-8'))
         headers = {
@@ -386,7 +461,6 @@ async def lut_preview(
     Returns a PNG image.
     """
     try:
-        # Parse settings JSON (sent as a Blob part)
         raw_settings = await settings.read()
         try:
             import json as _json
@@ -394,7 +468,6 @@ async def lut_preview(
         except Exception:
             payload = {}
 
-        # Pick the image file
         img_part = file or image
         if not img_part:
             return {"error": "no_image", "message": "Upload an image as 'file' or 'image'"}
@@ -402,16 +475,14 @@ async def lut_preview(
         if not img_bytes:
             return {"error": "empty_image"}
 
-        # Open image
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
 
-        # Build a temporary LUT volume from settings and apply via GPU/CPU sampler
+        # Build LUT from settings and apply
         vol_np, dmin, dmax = _build_lut_volume_from_settings(payload, int(payload.get('resolution') or 33))
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        vol_th, dm_th, dM_th = to_torch_lut(vol_np, torch.tensor(dmin), torch.tensor(dmax), device)
-        out = apply_lut_gpu(img, vol_th, dm_th, dM_th, strength=1.0, device=device)
+        vol_th, dm_th, dM_th = to_torch_lut(vol_np, dmin, dmax, device)
+        out = apply_lut_image(img, vol_th, dm_th, dM_th, strength=1.0, device=device)
 
-        # Encode PNG
         buf = io.BytesIO()
         out.save(buf, format='PNG')
         buf.seek(0)
