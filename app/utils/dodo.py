@@ -29,33 +29,49 @@ def build_endpoints() -> list[str]:
     path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
     if not path.startswith("/"):
         path = "/" + path
+    # Prefer session endpoints first to support redirect-based flows
     return [
-        f"{base}{path}",
-        f"{base}/checkouts",
-        f"{base}/v1/checkouts",
         f"{base}/v1/checkout/session",
-        f"{base}/checkout/session",
         f"{base}/v1/checkout/sessions",
+        f"{base}/checkout/session",
+        f"{base}/checkout",
+        f"{base}/v1/checkout",
+        # Payment link endpoints next (overlay/link fallback)
+        f"{base}{path}",
         f"{base}/v1/payment-links",
         f"{base}/payment-links",
         f"{base}/api/payment-links",
         f"{base}/v1/payment_links",
         f"{base}/v1/payment-links/create",
         f"{base}/payment-links/create",
-        f"{base}/v1/checkout",
-        f"{base}/checkout",
+        # Generic catch-alls
+        f"{base}/checkouts",
+        f"{base}/v1/checkouts",
     ]
 
 
 def pick_checkout_url(data: Dict[str, Any]) -> Optional[str]:
     if not isinstance(data, dict):
         return None
-    link = data.get("checkout_url") or data.get("url") or data.get("payment_link")
+    # Common fields for session or link creation responses
+    link = (
+        data.get("session_url")
+        or data.get("checkout_url")
+        or data.get("url")
+        or data.get("payment_link")
+    )
     if link:
         return str(link)
     obj = data.get("data") if isinstance(data, dict) else None
     if isinstance(obj, dict):
-        return str(obj.get("checkout_url") or obj.get("url") or obj.get("payment_link") or "") or None
+        inner = (
+            obj.get("session_url")
+            or obj.get("checkout_url")
+            or obj.get("url")
+            or obj.get("payment_link")
+            or ""
+        )
+        return str(inner) or None
     return None
 
 
