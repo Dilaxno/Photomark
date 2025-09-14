@@ -245,6 +245,78 @@ async def create_pricing_link(request: Request):
     return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
 
 
+@router.post("/session")
+async def create_pricing_session(request: Request):
+    """Create a Dodo checkout SESSION (server-side) and return a session_url for full-page redirect.
+
+    Request JSON: { plan: "photographers" | "agencies", returnUrl?: string, cancelUrl?: string }
+    Response: { session_url }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    plan = _normalize_plan((body.get("plan") if isinstance(body, dict) else "") or "")
+    allowed = _allowed_plans()
+    if plan not in allowed:
+        return JSONResponse({"error": "unsupported_plan", "allowed": sorted(list(allowed))}, status_code=400)
+
+    qty = 1
+    return_url = str(
+        (body.get("returnUrl") if isinstance(body, dict) else None)
+        or (body.get("return_url") if isinstance(body, dict) else None)
+        or os.getenv("PRICING_RETURN_URL")
+        or "https://photomark.cloud/#success"
+    )
+    cancel_url = str(
+        (body.get("cancelUrl") if isinstance(body, dict) else None)
+        or (body.get("cancel_url") if isinstance(body, dict) else None)
+        or os.getenv("PRICING_CANCEL_URL")
+        or "https://photomark.cloud/#pricing"
+    )
+
+    product_id = _plan_to_product_id(plan)
+    if not product_id:
+        logger.warning(f"[pricing.session] missing product id for plan='{plan}'. Check DODO_*_PRODUCT_ID env vars.")
+        return JSONResponse({"error": "product_id_not_configured", "plan": plan}, status_code=500)
+
+    # Build payloads leaning toward session-based endpoints first
+    email = _get_user_email(uid)
+    meta = {"user_uid": uid, "plan": plan}
+    ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
+
+    base = {
+        **ref_fields,
+        "metadata": meta,
+        "product_cart": [{"product_id": product_id, "quantity": qty}],
+        "return_url": return_url,
+        "cancel_url": cancel_url,
+        **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {}),
+    }
+    alt_payloads = [
+        base,
+        {**ref_fields, "metadata": meta, "products": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "items": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "product": {"id": product_id}, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "price_id": product_id, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+    ]
+
+    from app.utils.dodo import create_checkout_link, pick_checkout_url
+
+    url, details = await create_checkout_link(alt_payloads)
+    if not url:
+        logger.warning(f"[pricing.session] failed to create session: {details}")
+        return JSONResponse({"error": "session_creation_failed", "details": details}, status_code=502)
+
+    # Try to label as session_url for clarity
+    return {"session_url": url, "plan": plan}
+
+
 @router.get("/link/photographers")
 async def link_photographers(request: Request):
     # Convenience GET route
