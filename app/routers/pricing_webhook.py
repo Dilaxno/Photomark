@@ -370,12 +370,22 @@ async def pricing_webhook(request: Request):
 
     # --- Step 4: Normalize event object ---
     event_obj = None
+    data_node = payload.get("data") if isinstance(payload.get("data"), (dict, list)) else None
+    datta_node = payload.get("datta") if isinstance(payload.get("datta"), (dict, list)) else None  # provider typo safeguard
     # Common provider shapes: { data: { object: {...} } }
-    if isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("object"), dict):
-        event_obj = payload["data"]["object"]
+    if isinstance(data_node, dict) and isinstance(data_node.get("object"), dict):
+        event_obj = data_node["object"]
     # Some send arrays: { data: [ { object: {...} }, ... ] }
-    elif isinstance(payload.get("data"), list) and payload.get("data") and isinstance(payload["data"][0], dict) and isinstance(payload["data"][0].get("object"), dict):
-        event_obj = payload["data"][0]["object"]
+    elif isinstance(data_node, list) and data_node and isinstance(data_node[0], dict) and isinstance(data_node[0].get("object"), dict):
+        event_obj = data_node[0]["object"]
+    # Fallback: use data node directly when object wrapper is missing
+    elif isinstance(data_node, dict):
+        event_obj = data_node
+    # Provider typo 'datta' variants
+    elif isinstance(datta_node, dict) and isinstance(datta_node.get("object"), dict):
+        event_obj = datta_node["object"]
+    elif isinstance(datta_node, dict):
+        event_obj = datta_node
     elif isinstance(payload.get("object"), dict):
         event_obj = payload["object"]
     else:
@@ -415,9 +425,67 @@ async def pricing_webhook(request: Request):
     def _dict(d):
         return d if isinstance(d, dict) else {}
     payload_data = _dict(payload.get("data")) if isinstance(payload, dict) else {}
-    meta = _dict((event_obj or {}).get("metadata")) or _dict(payload_data.get("metadata")) or {}
-    # Overlay Checkout passes identifiers under data.query_params
-    qp = _dict((event_obj or {}).get("query_params")) or _dict(payload_data.get("query_params")) or {}
+    payload_datta = _dict(payload.get("datta")) if isinstance(payload, dict) else {}
+    meta = (
+        _dict((event_obj or {}).get("metadata"))
+        or _dict(payload_data.get("metadata"))
+        or _dict(payload_datta.get("metadata"))
+        or {}
+    )
+    # Overlay Checkout passes identifiers under data.query_params; accept 'datta' too
+    qp = (
+        _dict((event_obj or {}).get("query_params"))
+        or _dict(payload_data.get("query_params"))
+        or _dict(payload_datta.get("query_params"))
+        or {}
+    )
+
+    # Deep-scan fallback: locate a dict containing query_params / metadata anywhere in payload
+    if not qp:
+        try:
+            def _find_first_dict_with_key(node: dict, key: str, depth: int = 0) -> Optional[dict]:
+                if depth > 6 or not isinstance(node, dict):
+                    return None
+                if key in node and isinstance(node.get(key), dict):
+                    return node.get(key)
+                # Search common wrappers
+                for k in ("object", "data", "attributes", "details", "datta"):
+                    v = node.get(k)
+                    if isinstance(v, dict):
+                        got = _find_first_dict_with_key(v, key, depth + 1)
+                        if got:
+                            return got
+                    elif isinstance(v, list):
+                        for it in v[:50]:
+                            if isinstance(it, dict):
+                                got = _find_first_dict_with_key(it, key, depth + 1)
+                                if got:
+                                    return got
+                # Generic descent
+                for v in list(node.values())[:100]:
+                    if isinstance(v, dict):
+                        got = _find_first_dict_with_key(v, key, depth + 1)
+                        if got:
+                            return got
+                    elif isinstance(v, list):
+                        for it in v[:50]:
+                            if isinstance(it, dict):
+                                got = _find_first_dict_with_key(it, key, depth + 1)
+                                if got:
+                                    return got
+                return None
+            qp_found = _find_first_dict_with_key(payload if isinstance(payload, dict) else {}, "query_params")
+            if isinstance(qp_found, dict):
+                qp = qp_found
+        except Exception:
+            pass
+    if not meta:
+        try:
+            meta_found = _find_first_dict_with_key(payload if isinstance(payload, dict) else {}, "metadata")
+            if isinstance(meta_found, dict):
+                meta = meta_found
+        except Exception:
+            pass
 
     # --- Step 6: Resolve UID ---
     uid = ""
