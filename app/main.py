@@ -72,6 +72,12 @@ app.include_router(embed.router)
 from app.routers import upload, device  # noqa: E402
 app.include_router(upload.router)
 app.include_router(device.router)
+# portfolio publish endpoints
+try:
+    from app.routers import portfolio  # noqa: E402
+    app.include_router(portfolio.router)
+except Exception as _ex:
+    logger.warning(f"portfolio router not available: {_ex}")
 # style LUT GPU endpoint
 try:
     from app.routers import style_lut  # noqa: E402
