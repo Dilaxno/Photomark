@@ -120,13 +120,15 @@ async def generate_moodboard(
     fast: bool = Form(True),
     pages: bool = Form(False),
     board_max: Optional[int] = Form(None),
+    layout: str = Form("grid"),
 ):
     uploads_dir = os.path.join(STATIC_DIR, "tmp", "uploads")
     outputs_dir = os.path.join(STATIC_DIR, "moodboards")
     os.makedirs(uploads_dir, exist_ok=True)
     os.makedirs(outputs_dir, exist_ok=True)
 
-    MAX_IMAGES = 20
+    MAX_IMAGES = 200
+
     if not files:
         return JSONResponse({"error": "Please upload at least 1 image or a ZIP."}, status_code=400)
 
@@ -181,10 +183,19 @@ async def generate_moodboard(
     output_file = os.path.join(outputs_dir, out_name)
 
     n = len(file_paths)
-    cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-    cols = max(3, min(cols, 10))
-    rows = max(2, min(rows, 10))
+    layout_key = (layout or "grid").lower()
+    if layout_key not in ("grid", "masonry"):
+        layout_key = "grid"
+
+    if layout_key == "masonry":
+        # Denser layout to approximate a masonry feel by increasing columns
+        cols = max(4, min(12, int(math.ceil(math.sqrt(n) * 1.5))))
+        rows = max(2, int(math.ceil(n / max(1, cols))))
+    else:
+        cols = math.ceil(math.sqrt(n))
+        rows = math.ceil(n / cols)
+        cols = max(3, min(cols, 10))
+        rows = max(2, min(rows, 10))
 
     create_moodboard(file_paths, output_file, grid_size=(rows, cols), padding=12, bg_color=(245, 245, 245), fast=fast, board_max=board_max, quality=88)
 
