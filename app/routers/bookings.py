@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from typing import Optional, Dict, Any, List
 import uuid
 import time
+from string import Template
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.auth import get_fs_client as _get_fs_client
@@ -157,22 +158,33 @@ def _render_public_form_html(
     hide_payment_option: bool = False,
     allow_in_studio: bool = False,
 ) -> str:
-    css = f"""
-    :root{{--pm-accent:#8ab4f8}}
-    *{{box-sizing:border-box}}
-    body{{margin:0;background:{bg};color:#fafafa;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial}}
-    .container{{max-width:720px;margin:0 auto;padding:20px}}
-    h1{{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}}
-    .card{{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:{form_card_bg};padding:16px}}
-    label{{display:block;font-size:12px;color:{label_color};margin:10px 0 6px}}
-    input,textarea,select{{width:100%;background:rgba(0,0,0,.3);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px}}
-    button{{display:inline-flex;align-items:center;gap:8px;background:{button_bg};color:{button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}}
-    .row{{display:grid;gap:10px;grid-template-columns:1fr}}
-    @media(min-width:640px){{.row{{grid-template-columns:1fr 1fr}}}}
-    .note{{font-size:12px;opacity:.75;margin-top:8px}}
-    .ok{{background:#10b981;color:#001}}
-    .err{{background:#ef4444;color:#fff}}
-    """
+    # Use Template to avoid f-string brace issues with CSS/JS
+    css_tpl = Template(
+        """
+    :root{--pm-accent:#8ab4f8}
+    *{box-sizing:border-box}
+    body{margin:0;background:${bg};color:#fafafa;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial}
+    .container{max-width:720px;margin:0 auto;padding:20px}
+    h1{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}
+    .card{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:${form_card_bg};padding:16px}
+    label{display:block;font-size:12px;color:${label_color};margin:10px 0 6px}
+    input,textarea,select{width:100%;background:rgba(0,0,0,.3);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px}
+    button{display:inline-flex;align-items:center;gap:8px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}
+    .row{display:grid;gap:10px;grid-template-columns:1fr}
+    @media(min-width:640px){.row{grid-template-columns:1fr 1fr}}
+    .note{font-size:12px;opacity:.75;margin-top:8px}
+    .ok{background:#10b981;color:#001}
+    .err{background:#ef4444;color:#fff}
+        """.strip()
+    )
+    css = css_tpl.substitute(
+        bg=bg,
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+    )
+
     # Prepare conditional payment option HTML
     payment_html = "" if hide_payment_option else (
         """
@@ -185,6 +197,7 @@ def _render_public_form_html(
               </div>
         """
     )
+
     # Prepare optional studio toggle
     studio_html = (
         '<label style="display:flex;align-items:center;gap:8px;margin-top:8px">'
@@ -192,109 +205,127 @@ def _render_public_form_html(
         '</label>'
     ) if allow_in_studio else ''
 
-    # Note: The form posts to the same origin API endpoint
-    return f"""<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>Booking</title><style>{css}</style></head>
-    <body>
-      <div class='container'>
-        <h1>Booking Request</h1>
-        <div class='card'>
-          <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
-            <input type='hidden' name='form_id' value='{form_id}' />
-            <label>Full name</label>
-            <input name='client_name' required placeholder='Your name' />
-            <div class='row'>
-              <div>
-                <label>Email</label>
-                <input name='email' type='email' required placeholder='you@example.com' />
-              </div>
-              <div>
-                <label>Phone</label>
-                <input name='phone' required placeholder='+1 777 888 999' />
-              </div>
+    html_tpl = Template(
+        """<!doctype html>
+<html>
+  <head>
+    <meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>Booking</title>
+    <style>${css}</style>
+  </head>
+  <body>
+    <div class='container'>
+      <h1>Booking Request</h1>
+      <div class='card'>
+        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
+          <input type='hidden' name='form_id' value='${form_id}' />
+          <label>Full name</label>
+          <input name='client_name' required placeholder='Your name' />
+          <div class='row'>
+            <div>
+              <label>Email</label>
+              <input name='email' type='email' required placeholder='you@example.com' />
             </div>
-            <label>Location</label>
-            <input name='location' id='pm_location' placeholder='City, Country (auto)' />
-            {studio_html}
-            <input type='hidden' name='latitude' id='pm_lat' />
-            <input type='hidden' name='longitude' id='pm_lon' />
-            <label>Service details</label>
-            <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
-            <div class='row'>
-              <div>
-                <label>Preferred date</label>
-                <input name='date' type='date' required value='{default_date}' />
-              </div>
-              {payment_html}
+            <div>
+              <label>Phone</label>
+              <input name='phone' required placeholder='+1 777 888 999' />
             </div>
-            <button type='submit'>Submit</button>
-            <div id='msg' class='note'></div>
-          </form>
-        </div>
+          </div>
+          <label>Location</label>
+          <input name='location' id='pm_location' placeholder='City, Country (auto)' />
+          ${studio_html}
+          <input type='hidden' name='latitude' id='pm_lat' />
+          <input type='hidden' name='longitude' id='pm_lon' />
+          <label>Service details</label>
+          <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
+          <div class='row'>
+            <div>
+              <label>Preferred date</label>
+              <input name='date' type='date' required value='${default_date}' />
+            </div>
+            ${payment_html}
+          </div>
+          <button type='submit'>Submit</button>
+          <div id='msg' class='note'></div>
+        </form>
       </div>
-      <script>
-        // Geolocation: best-effort, fills hidden lat/lon and a simple location string
-        (function(){
-          try {
-            if (!navigator.geolocation) return;
-            navigator.geolocation.getCurrentPosition(function(pos){
-              try {
-                var lat = (pos && pos.coords && pos.coords.latitude) ? pos.coords.latitude.toFixed(6) : '';
-                var lon = (pos && pos.coords && pos.coords.longitude) ? pos.coords.longitude.toFixed(6) : '';
-                var latEl = document.getElementById('pm_lat');
-                var lonEl = document.getElementById('pm_lon');
-                var locEl = document.getElementById('pm_location');
-                if (latEl) latEl.value = lat;
-                if (lonEl) lonEl.value = lon;
-                if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
-              } catch(e) {}
-            });
-          } catch(e) {}
-        })();
-        (function(){
-          try {
-            var studio = document.getElementById('pm_studio');
-            var locEl = document.getElementById('pm_location');
-            var latEl = document.getElementById('pm_lat');
-            var lonEl = document.getElementById('pm_lon');
-            if (!studio) return;
-            var apply = function(){
-              if (!studio || !locEl) return;
-              if (studio.checked){
-                locEl.value = 'In studio';
-                if (latEl) latEl.value = '';
-                if (lonEl) lonEl.value = '';
-                locEl.setAttribute('readonly', 'readonly');
-              } else {
-                if (locEl.value === 'In studio') locEl.value = '';
-                locEl.removeAttribute('readonly');
-              }
-            };
-            studio.addEventListener('change', apply);
-            apply();
-          } catch(e) {}
-        })();
-        async function onSubmit(e){
-          e.preventDefault();
-          const form = e.target;
-          const msg = document.getElementById('msg');
-          msg.textContent = 'Submitting...';
-          msg.className = 'note';
-          try{
-            const fd = new FormData(form);
-            const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
-            const data = await res.json().catch(()=>({}));
-            if(!res.ok || data.error) throw new Error(data.error || 'Error');
-            msg.textContent = 'Thanks! We have received your request.';
-            msg.className = 'note ok';
-            form.reset();
-          }catch(err){
-            msg.textContent = err.message || 'Could not submit';
-            msg.className = 'note err';
-          }
-          return false;
+    </div>
+    <script>
+      // Geolocation: best-effort, fills hidden lat/lon and a simple location string
+      (function(){
+        try {
+          if (!navigator.geolocation) return;
+          navigator.geolocation.getCurrentPosition(function(pos){
+            try {
+              var lat = (pos && pos.coords && pos.coords.latitude) ? pos.coords.latitude.toFixed(6) : '';
+              var lon = (pos && pos.coords && pos.coords.longitude) ? pos.coords.longitude.toFixed(6) : '';
+              var latEl = document.getElementById('pm_lat');
+              var lonEl = document.getElementById('pm_lon');
+              var locEl = document.getElementById('pm_location');
+              if (latEl) latEl.value = lat;
+              if (lonEl) lonEl.value = lon;
+              if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
+            } catch(e) {}
+          });
+        } catch(e) {}
+      })();
+      (function(){
+        try {
+          var studio = document.getElementById('pm_studio');
+          var locEl = document.getElementById('pm_location');
+          var latEl = document.getElementById('pm_lat');
+          var lonEl = document.getElementById('pm_lon');
+          if (!studio) return;
+          var apply = function(){
+            if (!studio || !locEl) return;
+            if (studio.checked){
+              locEl.value = 'In studio';
+              if (latEl) latEl.value = '';
+              if (lonEl) lonEl.value = '';
+              locEl.setAttribute('readonly', 'readonly');
+            } else {
+              if (locEl.value === 'In studio') locEl.value = '';
+              locEl.removeAttribute('readonly');
+            }
+          };
+          studio.addEventListener('change', apply);
+          apply();
+        } catch(e) {}
+      })();
+      async function onSubmit(e){
+        e.preventDefault();
+        const form = e.target;
+        const msg = document.getElementById('msg');
+        msg.textContent = 'Submitting...';
+        msg.className = 'note';
+        try{
+          const fd = new FormData(form);
+          const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
+          const data = await res.json().catch(()=>({}));
+          if(!res.ok || data.error) throw new Error(data.error || 'Error');
+          msg.textContent = 'Thanks! We have received your request.';
+          msg.className = 'note ok';
+          form.reset();
+        }catch(err){
+          msg.textContent = err.message || 'Could not submit';
+          msg.className = 'note err';
         }
-      </script>
-    </body></html>"""
+        return false;
+      }
+    </script>
+  </body>
+</html>"""
+    )
+
+    html = html_tpl.substitute(
+        css=css,
+        form_id=form_id,
+        default_date=default_date,
+        payment_html=payment_html,
+        studio_html=studio_html,
+    )
+    return html
 
 
 # --------- Public submit (no auth) ---------
@@ -321,7 +352,7 @@ async def submit_booking(
 
         booking_id = _new_id()
         now = int(time.time())
-        record = {
+        record: Dict[str, Any] = {
             "id": booking_id,
             "user_uid": uid,
             "form_id": form_id,
@@ -388,7 +419,7 @@ async def list_bookings(request: Request, status: Optional[str] = None):
             docs = [d.to_dict() or {} for d in q.stream()]  # type: ignore[attr-defined]
             items = []
             for rec in docs:
-                lite = {
+                lite: Dict[str, Any] = {
                     "id": rec.get("id"),
                     "client_name": rec.get("client_name"),
                     "email": rec.get("email"),
@@ -435,7 +466,7 @@ async def get_booking(request: Request, booking_id: str):
         db = _get_fs_client()
         if db is not None:
             snap = db.collection('users').document(eff_uid).collection('bookings').document(booking_id).get()
-            if snap.exists:
+            if getattr(snap, 'exists', False):
                 data = snap.to_dict() or {}
                 if data:
                     return data
@@ -504,7 +535,7 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
                 db = _get_fs_client()
                 if db is not None:
                     snap = db.collection('users').document(eff_uid).get()
-                    if snap.exists:
+                    if getattr(snap, 'exists', False):
                         data = snap.to_dict() or {}
                         account_name = str(data.get('name') or account_name)
                         owner_email = str(data.get('email') or owner_email)
