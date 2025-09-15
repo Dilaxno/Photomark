@@ -21,6 +21,33 @@ def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
 
+TEMPLATE_DIR = os.path.abspath(r"D:\Software\Portfolio")
+
+def _copytree(src: str, dst: str):
+    import shutil
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+
+def _replace_placeholders(root: str, mapping: dict):
+    # Replace {{PLACEHOLDER}} in common text files
+    exts = {'.html', '.htm'}
+    for base, _, files in os.walk(root):
+        for name in files:
+            _, ext = os.path.splitext(name)
+            if ext.lower() in exts:
+                path = os.path.join(base, name)
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        s = f.read()
+                    for k, v in mapping.items():
+                        s = s.replace('{{' + k + '}}', str(v))
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(s)
+                except Exception:
+                    pass
+
+
 @router.post("/publish")
 async def publish_portfolio(
     site_name: str = Form(...),
@@ -136,6 +163,69 @@ async def publish_portfolio(
 
         # Public URL (served via /static mount). Adjust to your domain as needed.
         public_path = f"/static/portfolios/{safe_name}/index.html"
+        return JSONResponse({"ok": True, "url": public_path})
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+@router.post("/apply-template")
+async def apply_template(
+    site_name: str = Form(...),
+    display_name: str = Form(""),
+    description: str = Form(""),
+    about_text: str = Form(""),
+    contact_text: str = Form(""),
+    hero: Optional[UploadFile] = File(None),
+    gallery_count: Optional[int] = Form(0),
+    # Accept gallery files as gallery_0, gallery_1, ...
+    **kwargs,
+):
+    try:
+        safe_name = _safe_site_name(site_name)
+        if not os.path.isdir(TEMPLATE_DIR):
+            return JSONResponse({"error": "template_not_found", "path": TEMPLATE_DIR}, status_code=400)
+        base_dir = os.path.abspath(os.path.join(STATIC_DIR, "portfolios", safe_name, "site"))
+        _ensure_dir(os.path.dirname(base_dir))
+        _copytree(TEMPLATE_DIR, base_dir)
+
+        assets_dir = os.path.join(base_dir, "assets")
+        gallery_dir = os.path.join(assets_dir, "gallery")
+        _ensure_dir(assets_dir)
+        _ensure_dir(gallery_dir)
+
+        # Write hero
+        if hero is not None:
+            h_ext = os.path.splitext(hero.filename or "")[1] or ".jpg"
+            hero_path = os.path.join(assets_dir, f"hero{h_ext}")
+            with open(hero_path, "wb") as f:
+                f.write(await hero.read())
+
+        # Write gallery images
+        try:
+            n = int(gallery_count or 0)
+        except Exception:
+            n = 0
+        for i in range(n):
+            key = f"gallery_{i}"
+            file = kwargs.get(key)
+            if isinstance(file, UploadFile) and file.filename:
+                g_ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+                g_path = os.path.join(gallery_dir, f"img{i+1}{g_ext}")
+                with open(g_path, "wb") as f:
+                    f.write(await file.read())
+
+        # Replace placeholders in HTML files if present
+        mapping = {
+            'SITE_NAME': display_name or site_name,
+            'DESCRIPTION': description,
+            'ABOUT': about_text,
+            'CONTACT': contact_text,
+            # Common asset references if template uses placeholders
+            'HERO_SRC': 'assets/hero.jpg',
+        }
+        _replace_placeholders(base_dir, mapping)
+
+        public_path = f"/static/portfolios/{safe_name}/site/index.html"
         return JSONResponse({"ok": True, "url": public_path})
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
