@@ -39,19 +39,15 @@ def build_endpoints() -> list[str]:
         path = "/" + path
     # Prefer session endpoints first to support redirect-based flows
     return [
-        # Common session endpoints
-        f"{base}/v1/checkout/session",
+        # New official checkout sessions endpoint
+        f"{base}/v1/checkout-sessions",
+        # Common variants that some environments expose
         f"{base}/v1/checkout/sessions",
-        f"{base}/v1/checkout/sessions/create",
-        f"{base}/v1/checkout/sessions/initialize",
+        f"{base}/v1/checkout/session",
         f"{base}/checkout/session",
         f"{base}/checkouts/session",
-        f"{base}/v1/checkouts/session",
-        # Generic checkout endpoints
-        f"{base}/checkout",
-        f"{base}/checkouts",
-        f"{base}/v1/checkout",
-        f"{base}/v1/checkouts",
+        # Payments (for creating payment links when needed)
+        f"{base}/v1/payments",
         # Payment link endpoints next (overlay/link fallback)
         f"{base}{path}",
         f"{base}/v1/payment-links",
@@ -104,6 +100,8 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
         new_p.setdefault("success_url", redirect_url)
         new_p.setdefault("return_url", redirect_url)
         new_p.setdefault("redirect_url", redirect_url)
+        # If hitting the payments API, request a payment link instead of immediate charge
+        new_p.setdefault("payment_link", True)
         updated_payloads.append(new_p)
 
     last_error = None
