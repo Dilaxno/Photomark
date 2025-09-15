@@ -45,6 +45,9 @@ from datetime import datetime as _dt
 def _is_paid_customer(uid: str) -> bool:
     try:
         ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+        plan = str(ent.get('plan') or '').strip().lower()
+        if plan and plan != 'free':
+            return True
         return bool(ent.get('isPaid'))
     except Exception:
         return False

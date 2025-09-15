@@ -56,6 +56,10 @@ def _billing_uid_from_request(request: Request) -> str:
 def _is_paid_customer(uid: str) -> bool:
   try:
     ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
+    # Consider any non-free plan as paid to avoid entitlement lag blocking paid users
+    plan = str(ent.get('plan') or '').strip().lower()
+    if plan and plan != 'free':
+      return True
     return bool(ent.get('isPaid'))
   except Exception:
     return False
