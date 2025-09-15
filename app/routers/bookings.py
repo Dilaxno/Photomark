@@ -185,6 +185,12 @@ def _render_public_form_html(
               </div>
         """
     )
+    # Prepare optional studio toggle
+    studio_html = (
+        '<label style="display:flex;align-items:center;gap:8px;margin-top:8px">'
+        '<input type="checkbox" id="pm_studio" /> In studio'
+        '</label>'
+    ) if allow_in_studio else ''
 
     # Note: The form posts to the same origin API endpoint
     return f"""<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>Booking</title><style>{css}</style></head>
@@ -208,7 +214,7 @@ def _render_public_form_html(
             </div>
             <label>Location</label>
             <input name='location' id='pm_location' placeholder='City, Country (auto)' />
-            {('<label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="pm_studio" /> In studio</label>') if allow_in_studio else ''}
+            {studio_html}
             <input type='hidden' name='latitude' id='pm_lat' />
             <input type='hidden' name='longitude' id='pm_lon' />
             <label>Service details</label>
