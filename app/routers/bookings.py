@@ -34,6 +34,12 @@ def _user_booking_record_key(uid: str, booking_id: str) -> str:
 def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
+# Firestore client types (optional)
+try:
+    from firebase_admin import firestore as fb_fs  # type: ignore
+except Exception:
+    fb_fs = None  # type: ignore
+
 
 # --------- Form settings (per-user) ---------
 
@@ -326,6 +332,14 @@ async def submit_booking(
             record["longitude"] = longitude
         write_json_key(_user_booking_record_key(uid, booking_id), record)
 
+        # Firestore persistence (best-effort)
+        try:
+            db = _get_fs_client()
+            if db is not None:
+                db.collection('users').document(uid).collection('bookings').document(booking_id).set(record, merge=True)
+        except Exception as ex:
+            logger.warning(f"booking submit: firestore write failed for {uid}/{booking_id}: {ex}")
+
         idx = read_json_key(_user_bookings_index_key(uid)) or {"items": []}
         items = idx.get("items") or []
         # store a lightweight copy for listing
@@ -355,6 +369,41 @@ async def list_bookings(request: Request, status: Optional[str] = None):
     if not has_role_access(req_uid, eff_uid, 'gallery'):
         return {"error": "Forbidden"}
 
+    # Prefer Firestore if available
+    try:
+        db = _get_fs_client()
+        if db is not None:
+            q = db.collection('users').document(eff_uid).collection('bookings')
+            docs = [d.to_dict() or {} for d in q.stream()]  # type: ignore[attr-defined]
+            items = []
+            for rec in docs:
+                lite = {
+                    "id": rec.get("id"),
+                    "client_name": rec.get("client_name"),
+                    "email": rec.get("email"),
+                    "phone": rec.get("phone"),
+                    "date": rec.get("date"),
+                    "payment_option": rec.get("payment_option"),
+                    "status": rec.get("status"),
+                    "created_at": rec.get("created_at"),
+                    "updated_at": rec.get("updated_at"),
+                }
+                # include location if present
+                if rec.get("location"):
+                    lite["location"] = rec.get("location")
+                items.append(lite)
+            # filter and sort by created_at desc
+            if status and status in ("new","pending","confirmed","cancelled"):
+                items = [it for it in items if it.get("status") == status]
+            try:
+                items.sort(key=lambda x: int(x.get("created_at") or 0), reverse=True)
+            except Exception:
+                pass
+            return {"items": items}
+    except Exception as ex:
+        logger.warning(f"booking list: firestore read failed for {eff_uid}: {ex}")
+
+    # Fallback to JSON index
     idx = read_json_key(_user_bookings_index_key(eff_uid)) or {"items": []}
     items = idx.get("items") or []
     if status and status in ("new","pending","confirmed","cancelled"):
@@ -369,6 +418,18 @@ async def get_booking(request: Request, booking_id: str):
         return {"error": "Unauthorized"}
     if not has_role_access(req_uid, eff_uid, 'gallery'):
         return {"error": "Forbidden"}
+
+    # Try Firestore first
+    try:
+        db = _get_fs_client()
+        if db is not None:
+            snap = db.collection('users').document(eff_uid).collection('bookings').document(booking_id).get()
+            if snap.exists:
+                data = snap.to_dict() or {}
+                if data:
+                    return data
+    except Exception as ex:
+        logger.warning(f"booking get: firestore read failed for {eff_uid}/{booking_id}: {ex}")
 
     rec = read_json_key(_user_booking_record_key(eff_uid, booking_id))
     if not rec:
@@ -397,6 +458,17 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
     rec["status"] = new_status
     rec["updated_at"] = now
     write_json_key(rec_key, rec)
+
+    # Firestore update (best-effort)
+    try:
+        db = _get_fs_client()
+        if db is not None:
+            db.collection('users').document(eff_uid).collection('bookings').document(booking_id).set({
+                "status": new_status,
+                "updated_at": now,
+            }, merge=True)
+    except Exception as ex:
+        logger.warning(f"booking status: firestore update failed for {eff_uid}/{booking_id}: {ex}")
 
     # update index
     idx = read_json_key(_user_bookings_index_key(eff_uid)) or {"items": []}
