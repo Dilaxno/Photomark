@@ -403,14 +403,25 @@ async def process_watermark_zip(
     mem = io.BytesIO()
     mappings: list[tuple[str, str]] = []
     with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        used_names: set[str] = set()
+        def _unique_name(n: str) -> str:
+            base, ext = os.path.splitext(n)
+            cand = n
+            i = 1
+            while cand in used_names:
+                cand = f"{base}_{i}{ext}"
+                i += 1
+            used_names.add(cand)
+            return cand
         for uf in files:
             res = await _process_one(uf)
             if not res:
                 continue
             name, data = res
+            final_name = _unique_name(name)
             orig = os.path.basename(uf.filename or '') or 'image.jpg'
-            mappings.append((orig, name))
-            zf.writestr(name, data)
+            mappings.append((orig, final_name))
+            zf.writestr(final_name, data)
         # Write manifest
         try:
             if mappings:

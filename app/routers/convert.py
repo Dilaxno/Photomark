@@ -261,18 +261,30 @@ async def convert_bulk(
     def build_zip_bytes() -> bytes:
         mem = io.BytesIO()
         with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            # Ensure unique filenames inside the ZIP to avoid duplicate name warnings
+            used_names: set[str] = set()
+
+            def _unique_name(name: str) -> str:
+                base, ext = os.path.splitext(name)
+                cand = name
+                i = 1
+                while cand in used_names:
+                    cand = f"{base}_{i}{ext}"
+                    i += 1
+                used_names.add(cand)
+                return cand
             if len(files_data) < 10:
                 # Sequential
                 for f in files_data:
                     arcname, out_blob = convert_one(*f)
                     if out_blob:
-                        zf.writestr(arcname, out_blob)
+                        zf.writestr(_unique_name(arcname), out_blob)
             else:
                 # Parallel
                 with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     for arcname, out_blob in executor.map(_convert_one_unpack, files_data):
                         if out_blob:
-                            zf.writestr(arcname, out_blob)
+                            zf.writestr(_unique_name(arcname), out_blob)
         mem.seek(0)
         return mem.read()
 

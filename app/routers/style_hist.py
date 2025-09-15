@@ -420,11 +420,21 @@ async def hist_match(
       }
       return StreamingResponse(io.BytesIO(data), media_type=media, headers=headers)
 
-    # Multiple -> ZIP
+    # Multiple -> ZIP with unique names to avoid duplicate warnings
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+      used_names: set[str] = set()
+      def _unique_name(n: str) -> str:
+        base, ext = os.path.splitext(n)
+        cand = n
+        i = 1
+        while cand in used_names:
+          cand = f"{base}_{i}{ext}"
+          i += 1
+        used_names.add(cand)
+        return cand
       for _, name, data in results:
-        zf.writestr(name, data)
+        zf.writestr(_unique_name(name), data)
     zip_buf.seek(0)
     headers = {
       "Content-Disposition": "attachment; filename=styled_batch.zip",
@@ -550,8 +560,18 @@ async def reinhard_match(
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+      used_names: set[str] = set()
+      def _unique_name(n: str) -> str:
+        base, ext = os.path.splitext(n)
+        cand = n
+        i = 1
+        while cand in used_names:
+          cand = f"{base}_{i}{ext}"
+          i += 1
+        used_names.add(cand)
+        return cand
       for _, name, data in results:
-        zf.writestr(name, data)
+        zf.writestr(_unique_name(name), data)
     zip_buf.seek(0)
     headers = {
       "Content-Disposition": "attachment; filename=styled_batch.zip",
