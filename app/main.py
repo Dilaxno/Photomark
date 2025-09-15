@@ -72,6 +72,12 @@ app.include_router(embed.router)
 from app.routers import upload, device  # noqa: E402
 app.include_router(upload.router)
 app.include_router(device.router)
+# bookings endpoints
+try:
+    from app.routers import bookings  # noqa: E402
+    app.include_router(bookings.router)
+except Exception as _ex:
+    logger.warning(f"bookings router not available: {_ex}")
 # portfolio publish endpoints
 try:
     from app.routers import portfolio  # noqa: E402
