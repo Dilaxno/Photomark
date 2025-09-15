@@ -52,6 +52,13 @@ async def get_form(request: Request):
         form = {
             "form_id": form_id,
             "background_color": form.get("background_color") or "#0b0b0c",
+            # Optional customizations with sensible defaults
+            "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.06)",
+            "label_color": form.get("label_color") or "#fafafa",
+            "button_bg": form.get("button_bg") or "#8ab4f8",
+            "button_text": form.get("button_text") or "#000000",
+            "hide_payment_option": bool(form.get("hide_payment_option") or False),
+            "allow_in_studio": bool(form.get("allow_in_studio") or False),
             "updated_at": int(time.time()),
         }
         write_json_key(_user_form_key(eff_uid), form)
@@ -75,8 +82,21 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         form["form_id"] = form_id
 
     bg = payload.get("background_color") or form.get("background_color") or "#0b0b0c"
+    form_card_bg = payload.get("form_card_bg") or form.get("form_card_bg") or "rgba(255,255,255,.06)"
+    label_color = payload.get("label_color") or form.get("label_color") or "#fafafa"
+    button_bg = payload.get("button_bg") or form.get("button_bg") or "#8ab4f8"
+    button_text = payload.get("button_text") or form.get("button_text") or "#000000"
+    hide_payment_option = bool(payload.get("hide_payment_option") if payload.get("hide_payment_option") is not None else form.get("hide_payment_option") or False)
+    allow_in_studio = bool(payload.get("allow_in_studio") if payload.get("allow_in_studio") is not None else form.get("allow_in_studio") or False)
+
     form.update({
         "background_color": str(bg),
+        "form_card_bg": str(form_card_bg),
+        "label_color": str(label_color),
+        "button_bg": str(button_bg),
+        "button_text": str(button_text),
+        "hide_payment_option": bool(hide_payment_option),
+        "allow_in_studio": bool(allow_in_studio),
         "updated_at": int(time.time()),
     })
     write_json_key(_user_form_key(eff_uid), form)
@@ -94,26 +114,53 @@ async def public_booking_form(form_id: str, request: Request):
         return HTMLResponse("<h1>Form not found</h1>", status_code=404)
     form = read_json_key(_user_form_key(uid)) or {}
     bg = form.get("background_color") or "#0b0b0c"
+    form_card_bg = form.get("form_card_bg") or "rgba(255,255,255,.06)"
+    label_color = form.get("label_color") or "#fafafa"
+    button_bg = form.get("button_bg") or "#8ab4f8"
+    button_text = form.get("button_text") or "#000000"
+    hide_payment_option = bool(form.get("hide_payment_option") or False)
+    allow_in_studio = bool(form.get("allow_in_studio") or False)
     # Default date prefill through query param ?date=YYYY-MM-DD
     try:
         default_date = str(request.query_params.get("date") or "").strip()
     except Exception:
         default_date = ""
-    html = _render_public_form_html(form_id, bg, default_date)
+    html = _render_public_form_html(
+        form_id,
+        bg,
+        default_date,
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+        hide_payment_option=hide_payment_option,
+        allow_in_studio=allow_in_studio,
+    )
     return HTMLResponse(html)
 
 
-def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> str:
+def _render_public_form_html(
+    form_id: str,
+    bg: str,
+    default_date: str = "",
+    *,
+    form_card_bg: str = "rgba(255,255,255,.06)",
+    label_color: str = "#fafafa",
+    button_bg: str = "#8ab4f8",
+    button_text: str = "#000000",
+    hide_payment_option: bool = False,
+    allow_in_studio: bool = False,
+) -> str:
     css = f"""
     :root{{--pm-accent:#8ab4f8}}
     *{{box-sizing:border-box}}
     body{{margin:0;background:{bg};color:#fafafa;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial}}
     .container{{max-width:720px;margin:0 auto;padding:20px}}
     h1{{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}}
-    .card{{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(255,255,255,.06);padding:16px}}
-    label{{display:block;font-size:12px;opacity:.9;margin:10px 0 6px}}
+    .card{{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:{form_card_bg};padding:16px}}
+    label{{display:block;font-size:12px;color:{label_color};margin:10px 0 6px}}
     input,textarea,select{{width:100%;background:rgba(0,0,0,.3);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px}}
-    button{{display:inline-flex;align-items:center;gap:8px;background:var(--pm-accent);color:#000;font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}}
+    button{{display:inline-flex;align-items:center;gap:8px;background:{button_bg};color:{button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}}
     .row{{display:grid;gap:10px;grid-template-columns:1fr}}
     @media(min-width:640px){{.row{{grid-template-columns:1fr 1fr}}}}
     .note{{font-size:12px;opacity:.75;margin-top:8px}}
@@ -142,6 +189,7 @@ def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> s
             </div>
             <label>Location</label>
             <input name='location' id='pm_location' placeholder='City, Country (auto)' />
+            {('<label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="pm_studio" /> In studio</label>') if allow_in_studio else ''}
             <input type='hidden' name='latitude' id='pm_lat' />
             <input type='hidden' name='longitude' id='pm_lon' />
             <label>Service details</label>
@@ -151,6 +199,7 @@ def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> s
                 <label>Preferred date</label>
                 <input name='date' type='date' required value='{default_date}' />
               </div>
+              {(''<div></div>'') if hide_payment_option else f"""
               <div>
                 <label>Payment option</label>
                 <select name='payment_option'>
@@ -158,6 +207,7 @@ def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> s
                   <option value='offline'>Offline</option>
                 </select>
               </div>
+              """}
             </div>
             <button type='submit'>Submit</button>
             <div id='msg' class='note'></div>
@@ -181,6 +231,29 @@ def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> s
                 if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
               } catch(e) {}
             });
+          } catch(e) {}
+        })();
+        (function(){
+          try {
+            var studio = document.getElementById('pm_studio');
+            var locEl = document.getElementById('pm_location');
+            var latEl = document.getElementById('pm_lat');
+            var lonEl = document.getElementById('pm_lon');
+            if (!studio) return;
+            var apply = function(){
+              if (!studio || !locEl) return;
+              if (studio.checked){
+                locEl.value = 'In studio';
+                if (latEl) latEl.value = '';
+                if (lonEl) lonEl.value = '';
+                locEl.setAttribute('readonly', 'readonly');
+              } else {
+                if (locEl.value === 'In studio') locEl.value = '';
+                locEl.removeAttribute('readonly');
+              }
+            };
+            studio.addEventListener('change', apply);
+            apply();
           } catch(e) {}
         })();
         async function onSubmit(e){
