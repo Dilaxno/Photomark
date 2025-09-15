@@ -5,6 +5,8 @@ import uuid
 import time
 
 from app.core.auth import resolve_workspace_uid, has_role_access
+from app.core.auth import get_fs_client as _get_fs_client
+from app.utils.emailing import render_email, send_email_smtp
 from app.core.config import logger
 from app.utils.storage import read_json_key, write_json_key
 
@@ -291,5 +293,53 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
             break
     idx["items"] = items
     write_json_key(_user_bookings_index_key(eff_uid), idx)
+
+    # Notify client by email for important status changes
+    try:
+        if new_status in ("confirmed", "cancelled"):
+            client_email = (rec.get("email") or "").strip()
+            client_name = (rec.get("client_name") or "").strip()
+            # Resolve account (owner) name for branding in the message
+            account_name = "your photographer"
+            try:
+                db = _get_fs_client()
+                if db is not None:
+                    snap = db.collection('users').document(eff_uid).get()
+                    if snap.exists:
+                        data = snap.to_dict() or {}
+                        account_name = str(data.get('name') or account_name)
+            except Exception:
+                pass
+
+            if client_email:
+                if new_status == "confirmed":
+                    subject = "Your booking has been confirmed"
+                    intro = (
+                        f"Hi {client_name or 'there'},<br><br>"
+                        f"Good news! Your booking with <b>{account_name}</b> has been <b>confirmed</b>.<br>"
+                        "We’ll be in touch with next steps. If you have any questions, just reply to this email."
+                    )
+                else:
+                    subject = "Your booking has been cancelled"
+                    intro = (
+                        f"Hi {client_name or 'there'},<br><br>"
+                        f"We’re sorry to let you know your booking with <b>{account_name}</b> was <b>cancelled</b>.<br>"
+                        "If this was a mistake or you’d like to reschedule, please reach out."
+                    )
+
+                html = render_email(
+                    "email_basic.html",
+                    title=subject,
+                    intro=intro,
+                    footer_note=f"Status updated at: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+                )
+                # Best-effort: do not block API if email fails
+                try:
+                    send_email_smtp(client_email, subject, html)
+                except Exception:
+                    pass
+    except Exception:
+        # Never fail the API due to email issues
+        pass
 
     return {"ok": True, "status": new_status}
