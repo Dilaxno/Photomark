@@ -14,6 +14,14 @@ def build_headers_list() -> list[dict]:
     business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
     brand_id = (os.getenv("DODO_BRAND_ID") or "").strip()
     env_hdr = (os.getenv("DODO_PAYMENTS_ENVIRONMENT") or os.getenv("DODO_ENV") or "").strip().strip('"')
+    # Sensible default for test domains
+    if not env_hdr:
+        try:
+            base = (DODO_API_BASE or "").lower()
+            if "test.dodopayments.com" in base or "sandbox" in base:
+                env_hdr = "sandbox"
+        except Exception:
+            pass
     for h in headers_list:
         if business_id:
             h["Dodo-Business-Id"] = business_id
@@ -31,11 +39,19 @@ def build_endpoints() -> list[str]:
         path = "/" + path
     # Prefer session endpoints first to support redirect-based flows
     return [
+        # Common session endpoints
         f"{base}/v1/checkout/session",
         f"{base}/v1/checkout/sessions",
+        f"{base}/v1/checkout/sessions/create",
+        f"{base}/v1/checkout/sessions/initialize",
         f"{base}/checkout/session",
+        f"{base}/checkouts/session",
+        f"{base}/v1/checkouts/session",
+        # Generic checkout endpoints
         f"{base}/checkout",
+        f"{base}/checkouts",
         f"{base}/v1/checkout",
+        f"{base}/v1/checkouts",
         # Payment link endpoints next (overlay/link fallback)
         f"{base}{path}",
         f"{base}/v1/payment-links",
@@ -44,9 +60,6 @@ def build_endpoints() -> list[str]:
         f"{base}/v1/payment_links",
         f"{base}/v1/payment-links/create",
         f"{base}/payment-links/create",
-        # Generic catch-alls
-        f"{base}/checkouts",
-        f"{base}/v1/checkouts",
     ]
 
 
