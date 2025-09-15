@@ -383,6 +383,51 @@ def _render_public_form_html(
     return html
 
 
+@router.get("/preview")
+async def preview_booking(request: Request):
+    # Read appearance from query params to render instant preview without persistence
+    qp = request.query_params
+    def _pick(*keys: str, default: str = "") -> str:
+        for k in keys:
+            v = qp.get(k)
+            if v is not None:
+                return str(v)
+        return default
+
+    template = (_pick("template", "tpl", default="minimal") or "minimal").lower()
+    if template not in TEMPLATES:
+        template = "minimal"
+
+    bg = _pick("background_color", "bg", default="#0b0b0c")
+    form_card_bg = _pick("form_card_bg", "card_bg", default="rgba(255,255,255,.06)")
+    label_color = _pick("label_color", "label", default="#fafafa")
+    button_bg = _pick("button_bg", "btn_bg", default="#8ab4f8")
+    button_text = _pick("button_text", "btn_text", default="#000000")
+    date = _pick("date", default="")
+
+    def _bool(key: str) -> bool:
+        v = qp.get(key)
+        if v is None:
+            return False
+        return str(v).lower() in ("1", "true", "yes", "on")
+
+    hide_payment_option = _bool("hide_payment_option")
+    allow_in_studio = _bool("allow_in_studio")
+
+    html = _render_public_form_html(
+        form_id="preview",
+        bg=bg,
+        default_date=date,
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+        hide_payment_option=hide_payment_option,
+        allow_in_studio=allow_in_studio,
+        template=template,
+    )
+    return HTMLResponse(html)
+
 @router.get("/templates")
 async def list_templates():
     items = [{"id": k, "name": v.get("name"), "description": v.get("desc")} for k, v in TEMPLATES.items()]
