@@ -86,7 +86,7 @@ async def update_form(request: Request, payload: Dict[str, Any]):
 # --------- Public embed page (for iframe) ---------
 
 @router.get("/public/{form_id}")
-async def public_booking_form(form_id: str):
+async def public_booking_form(form_id: str, request: Request):
     # Resolve owner uid
     reg = read_json_key(_form_registry_key(form_id)) or {}
     uid = reg.get("user_uid")
@@ -94,11 +94,16 @@ async def public_booking_form(form_id: str):
         return HTMLResponse("<h1>Form not found</h1>", status_code=404)
     form = read_json_key(_user_form_key(uid)) or {}
     bg = form.get("background_color") or "#0b0b0c"
-    html = _render_public_form_html(form_id, bg)
+    # Default date prefill through query param ?date=YYYY-MM-DD
+    try:
+        default_date = str(request.query_params.get("date") or "").strip()
+    except Exception:
+        default_date = ""
+    html = _render_public_form_html(form_id, bg, default_date)
     return HTMLResponse(html)
 
 
-def _render_public_form_html(form_id: str, bg: str) -> str:
+def _render_public_form_html(form_id: str, bg: str, default_date: str = "") -> str:
     css = f"""
     :root{{--pm-accent:#8ab4f8}}
     *{{box-sizing:border-box}}
@@ -135,12 +140,16 @@ def _render_public_form_html(form_id: str, bg: str) -> str:
                 <input name='phone' required placeholder='+1 777 888 999' />
               </div>
             </div>
+            <label>Location</label>
+            <input name='location' id='pm_location' placeholder='City, Country (auto)' />
+            <input type='hidden' name='latitude' id='pm_lat' />
+            <input type='hidden' name='longitude' id='pm_lon' />
             <label>Service details</label>
             <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
             <div class='row'>
               <div>
                 <label>Preferred date</label>
-                <input name='date' type='date' required />
+                <input name='date' type='date' required value='{default_date}' />
               </div>
               <div>
                 <label>Payment option</label>
@@ -156,26 +165,44 @@ def _render_public_form_html(form_id: str, bg: str) -> str:
         </div>
       </div>
       <script>
-        async function onSubmit(e){{
+        // Geolocation: best-effort, fills hidden lat/lon and a simple location string
+        (function(){
+          try {
+            if (!navigator.geolocation) return;
+            navigator.geolocation.getCurrentPosition(function(pos){
+              try {
+                var lat = (pos && pos.coords && pos.coords.latitude) ? pos.coords.latitude.toFixed(6) : '';
+                var lon = (pos && pos.coords && pos.coords.longitude) ? pos.coords.longitude.toFixed(6) : '';
+                var latEl = document.getElementById('pm_lat');
+                var lonEl = document.getElementById('pm_lon');
+                var locEl = document.getElementById('pm_location');
+                if (latEl) latEl.value = lat;
+                if (lonEl) lonEl.value = lon;
+                if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
+              } catch(e) {}
+            });
+          } catch(e) {}
+        })();
+        async function onSubmit(e){
           e.preventDefault();
           const form = e.target;
           const msg = document.getElementById('msg');
           msg.textContent = 'Submitting...';
           msg.className = 'note';
-          try{{
+          try{
             const fd = new FormData(form);
-            const res = await fetch(form.action, {{ method: 'POST', body: fd, credentials: 'include' }});
-            const data = await res.json().catch(()=>({{}}));
+            const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
+            const data = await res.json().catch(()=>({}));
             if(!res.ok || data.error) throw new Error(data.error || 'Error');
             msg.textContent = 'Thanks! We have received your request.';
             msg.className = 'note ok';
             form.reset();
-          }}catch(err){{
+          }catch(err){
             msg.textContent = err.message || 'Could not submit';
             msg.className = 'note err';
-          }}
+          }
           return false;
-        }}
+        }
       </script>
     </body></html>"""
 
@@ -191,6 +218,9 @@ async def submit_booking(
     service_details: str = Form(""),
     date: str = Form(...),
     payment_option: str = Form("online"),
+    location: str = Form(""),
+    latitude: Optional[str] = Form(None),
+    longitude: Optional[str] = Form(None),
 ):
     try:
         # resolve form -> user
@@ -215,12 +245,24 @@ async def submit_booking(
             "created_at": now,
             "updated_at": now,
         }
+        if location:
+            record["location"] = location.strip()
+        if latitude:
+            record["latitude"] = latitude
+        if longitude:
+            record["longitude"] = longitude
         write_json_key(_user_booking_record_key(uid, booking_id), record)
 
         idx = read_json_key(_user_bookings_index_key(uid)) or {"items": []}
         items = idx.get("items") or []
         # store a lightweight copy for listing
-        lite = {k: record[k] for k in ["id","client_name","email","phone","date","payment_option","status","created_at","updated_at"]}
+        lite_keys = ["id","client_name","email","phone","date","payment_option","status","created_at","updated_at"]
+        try:
+            if record.get("location"):
+                lite_keys.append("location")
+        except Exception:
+            pass
+        lite = {k: record[k] for k in lite_keys if k in record}
         items.insert(0, lite)
         idx["items"] = items[:1000]
         write_json_key(_user_bookings_index_key(uid), idx)
@@ -301,6 +343,7 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
             client_name = (rec.get("client_name") or "").strip()
             # Resolve account (owner) name for branding in the message
             account_name = "your photographer"
+            owner_email = ""
             try:
                 db = _get_fs_client()
                 if db is not None:
@@ -308,6 +351,7 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
                     if snap.exists:
                         data = snap.to_dict() or {}
                         account_name = str(data.get('name') or account_name)
+                        owner_email = str(data.get('email') or owner_email)
             except Exception:
                 pass
 
@@ -317,14 +361,14 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
                     intro = (
                         f"Hi {client_name or 'there'},<br><br>"
                         f"Good news! Your booking with <b>{account_name}</b> has been <b>confirmed</b>.<br>"
-                        "We’ll be in touch with next steps. If you have any questions, just reply to this email."
+                        f"If you have any questions, you can reach out directly at <a href='mailto:{owner_email or 'support@photomark.app'}'>{owner_email or 'support@photomark.app'}</a>."
                     )
                 else:
                     subject = "Your booking has been cancelled"
                     intro = (
                         f"Hi {client_name or 'there'},<br><br>"
                         f"We’re sorry to let you know your booking with <b>{account_name}</b> was <b>cancelled</b>.<br>"
-                        "If this was a mistake or you’d like to reschedule, please reach out."
+                        f"If this was a mistake or you’d like to reschedule, contact us at <a href='mailto:{owner_email or 'support@photomark.app'}'>{owner_email or 'support@photomark.app'}</a>."
                     )
 
                 html = render_email(
@@ -335,7 +379,7 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
                 )
                 # Best-effort: do not block API if email fails
                 try:
-                    send_email_smtp(client_email, subject, html)
+                    send_email_smtp(client_email, subject, html, reply_to=(owner_email or None), from_name=account_name)
                 except Exception:
                     pass
     except Exception:
