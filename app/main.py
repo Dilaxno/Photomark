@@ -17,7 +17,7 @@ warnings.filterwarnings(
 # Routers
 from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading
 
-from app.routers import pricing_checkout
+# Pricing checkout (server-side) removed in favor of client-side overlay
 
 app = FastAPI(title="Photo Watermarker")
 
@@ -64,7 +64,7 @@ app.include_router(gallery_assistant.router)
 # Color grading (LUT)
 app.include_router(color_grading.router)
 
-app.include_router(pricing_checkout.router)
+# app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
 from app.routers import embed  # noqa: E402
 app.include_router(embed.router)
