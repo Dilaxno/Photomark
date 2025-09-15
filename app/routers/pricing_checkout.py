@@ -137,6 +137,11 @@ async def create_pricing_link(request: Request):
             "user_uid": uid,
             "plan": plan,
         },
+        # Surface identifiers in query params for overlay checkouts (providers often echo these back to webhooks)
+        "query_params": {"user_uid": uid, "plan": plan},
+        # Add common naming variants some providers expect
+        "query": {"user_uid": uid, "plan": plan},
+        "params": {"user_uid": uid, "plan": plan},
         "product_cart": [
             {"product_id": product_id, "quantity": qty},
         ],
@@ -167,6 +172,9 @@ async def create_pricing_link(request: Request):
             **ref_fields,
             "product_cart": [{"product_id": product_id, "quantity": qty}],
             "metadata": {"user_uid": uid, "plan": plan},
+            "query_params": {"user_uid": uid, "plan": plan},
+            "query": {"user_uid": uid, "plan": plan},
+            "params": {"user_uid": uid, "plan": plan},
             **({"email": email, "customer_email": email} if email else {}),
         },
         base_payload,
@@ -175,6 +183,9 @@ async def create_pricing_link(request: Request):
             **common_top,
             **ref_fields,
             "metadata": base_payload["metadata"],
+            "query_params": {"user_uid": uid, "plan": plan},
+            "query": {"user_uid": uid, "plan": plan},
+            "params": {"user_uid": uid, "plan": plan},
             "items": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
@@ -185,6 +196,9 @@ async def create_pricing_link(request: Request):
             **common_top,
             **ref_fields,
             "metadata": base_payload["metadata"],
+            "query_params": {"user_uid": uid, "plan": plan},
+            "query": {"user_uid": uid, "plan": plan},
+            "params": {"user_uid": uid, "plan": plan},
             "products": [{"product_id": product_id, "quantity": qty}],
             "redirect_url": redirect_url,
             "cancel_url": cancel_url,
@@ -195,6 +209,9 @@ async def create_pricing_link(request: Request):
             **common_top,
             **ref_fields,
             "metadata": base_payload["metadata"],
+            "query_params": {"user_uid": uid, "plan": plan},
+            "query": {"user_uid": uid, "plan": plan},
+            "params": {"user_uid": uid, "plan": plan},
             "product": {"id": product_id},
             "quantity": qty,
             "redirect_url": redirect_url,
@@ -206,6 +223,9 @@ async def create_pricing_link(request: Request):
             **common_top,
             **ref_fields,
             "metadata": base_payload["metadata"],
+            "query_params": {"user_uid": uid, "plan": plan},
+            "query": {"user_uid": uid, "plan": plan},
+            "params": {"user_uid": uid, "plan": plan},
             "price_id": product_id,
             "quantity": qty,
             "redirect_url": redirect_url,
@@ -288,11 +308,15 @@ async def create_pricing_session(request: Request):
     # Build payloads leaning toward session-based endpoints first
     email = _get_user_email(uid)
     meta = {"user_uid": uid, "plan": plan}
+    qp = {"user_uid": uid, "plan": plan}
     ref_fields = {"client_reference_id": uid, "reference_id": uid, "external_id": uid}
 
     base = {
         **ref_fields,
         "metadata": meta,
+        "query_params": qp,
+        "query": qp,
+        "params": qp,
         "product_cart": [{"product_id": product_id, "quantity": qty}],
         "return_url": return_url,
         "cancel_url": cancel_url,
@@ -300,10 +324,10 @@ async def create_pricing_session(request: Request):
     }
     alt_payloads = [
         base,
-        {**ref_fields, "metadata": meta, "products": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
-        {**ref_fields, "metadata": meta, "items": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
-        {**ref_fields, "metadata": meta, "product": {"id": product_id}, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
-        {**ref_fields, "metadata": meta, "price_id": product_id, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "query_params": qp, "query": qp, "params": qp, "products": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "query_params": qp, "query": qp, "params": qp, "items": [{"product_id": product_id, "quantity": qty}], "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "query_params": qp, "query": qp, "params": qp, "product": {"id": product_id}, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
+        {**ref_fields, "metadata": meta, "query_params": qp, "query": qp, "params": qp, "price_id": product_id, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
     ]
 
     from app.utils.dodo import create_checkout_link, pick_checkout_url
