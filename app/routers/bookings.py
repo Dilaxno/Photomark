@@ -173,6 +173,19 @@ def _render_public_form_html(
     .ok{{background:#10b981;color:#001}}
     .err{{background:#ef4444;color:#fff}}
     """
+    # Prepare conditional payment option HTML
+    payment_html = "" if hide_payment_option else (
+        """
+              <div>
+                <label>Payment option</label>
+                <select name='payment_option'>
+                  <option value='online'>Online</option>
+                  <option value='offline'>Offline</option>
+                </select>
+              </div>
+        """
+    )
+
     # Note: The form posts to the same origin API endpoint
     return f"""<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>Booking</title><style>{css}</style></head>
     <body>
@@ -205,15 +218,7 @@ def _render_public_form_html(
                 <label>Preferred date</label>
                 <input name='date' type='date' required value='{default_date}' />
               </div>
-              {(''<div></div>'') if hide_payment_option else f"""
-              <div>
-                <label>Payment option</label>
-                <select name='payment_option'>
-                  <option value='online'>Online</option>
-                  <option value='offline'>Offline</option>
-                </select>
-              </div>
-              """}
+              {payment_html}
             </div>
             <button type='submit'>Submit</button>
             <div id='msg' class='note'></div>
