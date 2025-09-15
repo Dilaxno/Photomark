@@ -163,7 +163,7 @@ def _render_public_form_html(
         """
     :root{--pm-accent:#8ab4f8}
     *{box-sizing:border-box}
-    body{margin:0;background:${bg};color:#fafafa;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial}
+    body{margin:0;background:${bg};color:#fafafa;font-family:'Outfit', -apple-system, system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial}
     .container{max-width:720px;margin:0 auto;padding:20px}
     h1{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}
     .card{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:${form_card_bg};padding:16px}
@@ -212,6 +212,9 @@ def _render_public_form_html(
     <meta charset='utf-8'/>
     <meta name='viewport' content='width=device-width,initial-scale=1'/>
     <title>Booking</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
     <style>${css}</style>
   </head>
   <body>
