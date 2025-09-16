@@ -12,22 +12,7 @@ from app.core.config import logger
 from app.utils.storage import read_json_key, write_json_key
 
 router = APIRouter(prefix="/api/booking", tags=["booking"])  # dashboard + form settings
-
-# Available templates for the public booking form
-TEMPLATES: Dict[str, Dict[str, str]] = {
-    "minimal": {
-        "name": "Minimal",
-        "desc": "Clean, simple card with subtle borders."
-    },
-    "glass": {
-        "name": "Glass",
-        "desc": "Translucent glassmorphism card with blur and glow."
-    },
-    "split": {
-        "name": "Split",
-        "desc": "Two-column layout with hero title on the left."
-    },
-}
+# Single booking layout (Split). Templates removed.
 
 
 # --------- Helpers ---------
@@ -74,7 +59,6 @@ async def get_form(request: Request):
         form_id = _new_id()
         form = {
             "form_id": form_id,
-            "template": form.get("template") or "split",
             "background_color": form.get("background_color") or "#0a0d0f",
             # Optional customizations with sensible defaults
             "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.04)",
@@ -112,9 +96,7 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     button_text = payload.get("button_text") or form.get("button_text") or "#000000"
     hide_payment_option = bool(payload.get("hide_payment_option") if payload.get("hide_payment_option") is not None else form.get("hide_payment_option") or False)
     allow_in_studio = bool(payload.get("allow_in_studio") if payload.get("allow_in_studio") is not None else form.get("allow_in_studio") or False)
-    template = str(payload.get("template") or form.get("template") or "minimal").lower()
-    if template not in TEMPLATES:
-        template = "minimal"
+    # template removed
 
     form.update({
         "background_color": str(bg),
@@ -124,7 +106,6 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "button_text": str(button_text),
         "hide_payment_option": bool(hide_payment_option),
         "allow_in_studio": bool(allow_in_studio),
-        "template": template,
         "updated_at": int(time.time()),
     })
     write_json_key(_user_form_key(eff_uid), form)
@@ -148,14 +129,7 @@ async def public_booking_form(form_id: str, request: Request):
     button_text = form.get("button_text") or "#000000"
     hide_payment_option = bool(form.get("hide_payment_option") or False)
     allow_in_studio = bool(form.get("allow_in_studio") or False)
-    template = str(form.get("template") or "minimal").lower()
-    # Allow preview override: ?tpl=glass|split|minimal
-    try:
-        tpl_q = str(request.query_params.get("tpl") or request.query_params.get("template") or "").strip().lower()
-        if tpl_q and tpl_q in TEMPLATES:
-            template = tpl_q
-    except Exception:
-        pass
+    # templates removed; always render split layout
     # Default date prefill through query param ?date=YYYY-MM-DD
     try:
         default_date = str(request.query_params.get("date") or "").strip()
@@ -171,7 +145,6 @@ async def public_booking_form(form_id: str, request: Request):
         button_text=button_text,
         hide_payment_option=hide_payment_option,
         allow_in_studio=allow_in_studio,
-        template=template,
     )
     return HTMLResponse(html)
 
@@ -187,7 +160,6 @@ def _render_public_form_html(
     button_text: str = "#001014",
     hide_payment_option: bool = False,
     allow_in_studio: bool = False,
-    template: str = "minimal",
 ) -> str:
     # Use Template to avoid f-string brace issues with CSS/JS
     css_tpl = Template(
@@ -208,26 +180,15 @@ def _render_public_form_html(
     .err{background:#ef4444;color:#fff}
         """.strip()
     )
-    # Base CSS + template modifiers
-    base_css = css_tpl.substitute(
+    # Base CSS for the split layout
+    css = css_tpl.substitute(
         bg=bg,
         form_card_bg=form_card_bg,
         label_color=label_color,
         button_bg=button_bg,
         button_text=button_text,
-    )
-    # Template variants
-    tpl_mod = ""
-    if template == "glass":
-        tpl_mod = """
-        .container{max-width:780px}
-        .card{background:rgba(255,255,255,0.08);backdrop-filter:blur(12px);border-color:rgba(255,255,255,.22);box-shadow:0 20px 60px rgba(0,0,0,.35)}
-        button{border-radius:999px}
-        input,textarea,select{background:rgba(255,255,255,.06)}
-        h1{letter-spacing:-.03em}
+    ) + "\n" + Template(
         """
-    elif template == "split":
-        tpl_mod = """
         .container{max-width:980px;display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}
         @media(max-width:980px){.container{display:block}}
         .hero{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
@@ -246,7 +207,12 @@ def _render_public_form_html(
         .actions{margin-top:16px}
         .actions button{background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0}
         """
-    css = base_css + "\n" + tpl_mod
+    ).substitute(
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+    )
 
     # Prepare conditional payment option HTML
     payment_html = "" if hide_payment_option else (
@@ -268,10 +234,9 @@ def _render_public_form_html(
         '</label>'
     ) if allow_in_studio else ''
 
-    # Build content HTML depending on template
-    if template == "split":
-        content_html = Template(
-            """
+    # Single split layout content
+    content_html = Template(
+        """
     <div class='container'>
       <section class='hero'>
         <div class='pill'>Book</div>
@@ -325,49 +290,8 @@ def _render_public_form_html(
         </form>
       </section>
     </div>
-            """
-        ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
-    else:
-        content_html = Template(
-            """
-    <div class='container'>
-      <h1>Booking Request</h1>
-      <div class='card'>
-        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
-          <input type='hidden' name='form_id' value='${form_id}' />
-          <label>Full name</label>
-          <input name='client_name' required placeholder='Your name' />
-          <div class='row'>
-            <div>
-              <label>Email</label>
-              <input name='email' type='email' required placeholder='you@example.com' />
-            </div>
-            <div>
-              <label>Phone</label>
-              <input name='phone' required placeholder='+1 777 888 999' />
-            </div>
-          </div>
-          <label>Location</label>
-          <input name='location' id='pm_location' placeholder='City, Country (auto)' />
-          ${studio_html}
-          <input type='hidden' name='latitude' id='pm_lat' />
-          <input type='hidden' name='longitude' id='pm_lon' />
-          <label>Service details</label>
-          <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
-          <div class='row'>
-            <div>
-              <label>Preferred date</label>
-              <input name='date' type='date' required value='${default_date}' />
-            </div>
-            ${payment_html}
-          </div>
-          <button type='submit'>Submit</button>
-          <div id='msg' class='note'></div>
-        </form>
-      </div>
-    </div>
-            """
-        ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
+        """
+    ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
 
     html_tpl = Template(
         """<!doctype html>
@@ -381,7 +305,7 @@ def _render_public_form_html(
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
     <style>${css}</style>
   </head>
-  <body class='tpl-${template}'>
+  <body>
     ${content}
     <script>
       // Geolocation: best-effort, fills hidden lat/lon and a simple location string
@@ -462,7 +386,6 @@ def _render_public_form_html(
 
     html = html_tpl.substitute(
         css=css,
-        template=template,
         content=content_html,
     )
     return html
@@ -479,9 +402,7 @@ async def preview_booking(request: Request):
                 return str(v)
         return default
 
-    template = (_pick("template", "tpl", default="minimal") or "minimal").lower()
-    if template not in TEMPLATES:
-        template = "minimal"
+    # templates removed
 
     bg = _pick("background_color", "bg", default="#0a0d0f")
     form_card_bg = _pick("form_card_bg", "card_bg", default="rgba(255,255,255,.04)")
@@ -509,14 +430,10 @@ async def preview_booking(request: Request):
         button_text=button_text,
         hide_payment_option=hide_payment_option,
         allow_in_studio=allow_in_studio,
-        template=template,
     )
     return HTMLResponse(html)
 
-@router.get("/templates")
-async def list_templates():
-    items = [{"id": k, "name": v.get("name"), "description": v.get("desc")} for k, v in TEMPLATES.items()]
-    return {"items": items}
+# templates endpoint removed
 
 
 # --------- Public submit (no auth) ---------
