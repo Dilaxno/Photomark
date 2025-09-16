@@ -74,7 +74,7 @@ async def get_form(request: Request):
         form_id = _new_id()
         form = {
             "form_id": form_id,
-            "template": form.get("template") or "minimal",
+            "template": form.get("template") or "split",
             "background_color": form.get("background_color") or "#0a0d0f",
             # Optional customizations with sensible defaults
             "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.04)",
@@ -274,13 +274,13 @@ def _render_public_form_html(
             """
     <div class='container'>
       <section class='hero'>
-        <div class='pill'>Contact</div>
-        <h1>Get in touch with us!</h1>
-        <p class='sub'>Have questions or ideas? We'd love to hear from you. Reach out anytime and let's connect.</p>
-        <a href='#form' class='cta'>Contact Us</a>
+        <div class='pill'>Book</div>
+        <h1>Book Your Photography Session!</h1>
+        <p class='sub'>Have a special moment to capture? We'd love to hear from you. Reach out anytime and let's create something beautiful together.</p>
+        <a href='#form' class='cta'>Book Now</a>
       </section>
       <section class='form-card' id='form'>
-        <div class='form-title'>Contact Us</div>
+        <div class='form-title'>Book Your Session</div>
         <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
           <input type='hidden' name='form_id' value='${form_id}' />
           <input type='hidden' name='client_name' id='pm_cn' />
