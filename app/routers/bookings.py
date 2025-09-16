@@ -75,12 +75,12 @@ async def get_form(request: Request):
         form = {
             "form_id": form_id,
             "template": form.get("template") or "minimal",
-            "background_color": form.get("background_color") or "#0b0b0c",
+            "background_color": form.get("background_color") or "#0a0d0f",
             # Optional customizations with sensible defaults
-            "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.06)",
-            "label_color": form.get("label_color") or "#fafafa",
-            "button_bg": form.get("button_bg") or "#8ab4f8",
-            "button_text": form.get("button_text") or "#000000",
+            "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.04)",
+            "label_color": form.get("label_color") or "#cbd5e1",
+            "button_bg": form.get("button_bg") or "#7fe0d6",
+            "button_text": form.get("button_text") or "#001014",
             "hide_payment_option": bool(form.get("hide_payment_option") or False),
             "allow_in_studio": bool(form.get("allow_in_studio") or False),
             "updated_at": int(time.time()),
@@ -181,10 +181,10 @@ def _render_public_form_html(
     bg: str,
     default_date: str = "",
     *,
-    form_card_bg: str = "rgba(255,255,255,.06)",
-    label_color: str = "#fafafa",
-    button_bg: str = "#8ab4f8",
-    button_text: str = "#000000",
+    form_card_bg: str = "rgba(255,255,255,.04)",
+    label_color: str = "#cbd5e1",
+    button_bg: str = "#7fe0d6",
+    button_text: str = "#001014",
     hide_payment_option: bool = False,
     allow_in_studio: bool = False,
     template: str = "minimal",
@@ -229,10 +229,22 @@ def _render_public_form_html(
     elif template == "split":
         tpl_mod = """
         .container{max-width:980px;display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}
-        @media(max-width:860px){.container{display:block}}
-        h1{font-size:clamp(28px,5vw,44px);opacity:.95;margin:6px 0 8px}
-        .card{padding:22px;border-radius:18px;box-shadow:0 20px 50px rgba(0,0,0,.35)}
-        .note{opacity:.85}
+        @media(max-width:980px){.container{display:block}}
+        .hero{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+        .hero .pill{display:inline-block;border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:6px 12px;font-size:12px;opacity:.9;margin-bottom:10px}
+        .hero h1{font-size:clamp(28px,5vw,44px);font-weight:800;letter-spacing:-.02em;margin:0 0 10px}
+        .hero .sub{opacity:.85;max-width:46ch;line-height:1.5}
+        .hero .cta{display:inline-flex;margin-top:18px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 16px;border-radius:12px;text-decoration:none}
+        .form-card{border:1px solid rgba(255,255,255,.12);border-radius:20px;background:${form_card_bg};padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+        .form-title{font-size:16px;font-weight:600;margin-bottom:16px}
+        .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+        @media(max-width:640px){.grid-2{grid-template-columns:1fr}}
+        .field{margin:10px 0}
+        .field label{font-size:12px;color:${label_color};display:block;margin-bottom:6px}
+        .field input,.field textarea,.field select{width:100%;background:transparent;color:#fff;border:0;border-bottom:1px solid rgba(255,255,255,.14);border-radius:0;padding:10px 0}
+        .field textarea{resize:vertical}
+        .actions{margin-top:16px}
+        .actions button{background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0}
         """
     css = base_css + "\n" + tpl_mod
 
@@ -256,19 +268,68 @@ def _render_public_form_html(
         '</label>'
     ) if allow_in_studio else ''
 
-    html_tpl = Template(
-        """<!doctype html>
-<html>
-  <head>
-    <meta charset='utf-8'/>
-    <meta name='viewport' content='width=device-width,initial-scale=1'/>
-    <title>Booking</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com"/>
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
-    <style>${css}</style>
-  </head>
-  <body class='tpl-${template}'>
+    # Build content HTML depending on template
+    if template == "split":
+        content_html = Template(
+            """
+    <div class='container'>
+      <section class='hero'>
+        <div class='pill'>Contact</div>
+        <h1>Get in touch with us!</h1>
+        <p class='sub'>Have questions or ideas? We'd love to hear from you. Reach out anytime and let's connect.</p>
+        <a href='#form' class='cta'>Contact Us</a>
+      </section>
+      <section class='form-card' id='form'>
+        <div class='form-title'>Contact Us</div>
+        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
+          <input type='hidden' name='form_id' value='${form_id}' />
+          <input type='hidden' name='client_name' id='pm_cn' />
+          <input type='hidden' name='latitude' id='pm_lat' />
+          <input type='hidden' name='longitude' id='pm_lon' />
+          <div class='grid-2'>
+            <div class='field'>
+              <label>First Name</label>
+              <input id='pm_fn' placeholder='John' />
+            </div>
+            <div class='field'>
+              <label>Last Name</label>
+              <input id='pm_ln' placeholder='Doe' />
+            </div>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Phone</label>
+              <input name='phone' placeholder='+1 777 888 999' required />
+            </div>
+            <div class='field'>
+              <label>Email Address</label>
+              <input name='email' type='email' placeholder='you@example.com' required />
+            </div>
+          </div>
+          <div class='field'>
+            <label>Message</label>
+            <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Preferred date</label>
+              <input name='date' type='date' required value='${default_date}' />
+            </div>
+            ${payment_html}
+          </div>
+          ${studio_html}
+          <div class='actions'>
+            <button type='submit'>Submit</button>
+            <div id='msg' class='note' style='display:inline-block;margin-left:10px'></div>
+          </div>
+        </form>
+      </section>
+    </div>
+            """
+        ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
+    else:
+        content_html = Template(
+            """
     <div class='container'>
       <h1>Booking Request</h1>
       <div class='card'>
@@ -305,6 +366,23 @@ def _render_public_form_html(
         </form>
       </div>
     </div>
+            """
+        ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
+
+    html_tpl = Template(
+        """<!doctype html>
+<html>
+  <head>
+    <meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>Booking</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+    <style>${css}</style>
+  </head>
+  <body class='tpl-${template}'>
+    ${content}
     <script>
       // Geolocation: best-effort, fills hidden lat/lon and a simple location string
       (function(){
@@ -334,13 +412,13 @@ def _render_public_form_html(
           var apply = function(){
             if (!studio || !locEl) return;
             if (studio.checked){
-              locEl.value = 'In studio';
+              if (locEl) locEl.value = 'In studio';
               if (latEl) latEl.value = '';
               if (lonEl) lonEl.value = '';
-              locEl.setAttribute('readonly', 'readonly');
+              if (locEl) locEl.setAttribute('readonly', 'readonly');
             } else {
-              if (locEl.value === 'In studio') locEl.value = '';
-              locEl.removeAttribute('readonly');
+              if (locEl && locEl.value === 'In studio') locEl.value = '';
+              if (locEl) locEl.removeAttribute('readonly');
             }
           };
           studio.addEventListener('change', apply);
@@ -354,6 +432,16 @@ def _render_public_form_html(
         msg.textContent = 'Submitting...';
         msg.className = 'note';
         try{
+          // Compose client_name if split fields are present
+          try{
+            const fn = document.getElementById('pm_fn');
+            const ln = document.getElementById('pm_ln');
+            const cn = document.getElementById('pm_cn');
+            if (cn) {
+              const v = [fn && fn.value || '', ln && ln.value || ''].filter(Boolean).join(' ').trim();
+              if (v) cn.value = v;
+            }
+          } catch(_e){}
           const fd = new FormData(form);
           const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
           const data = await res.json().catch(()=>({}));
@@ -374,11 +462,8 @@ def _render_public_form_html(
 
     html = html_tpl.substitute(
         css=css,
-        form_id=form_id,
-        default_date=default_date,
-        payment_html=payment_html,
-        studio_html=studio_html,
         template=template,
+        content=content_html,
     )
     return html
 
@@ -398,11 +483,11 @@ async def preview_booking(request: Request):
     if template not in TEMPLATES:
         template = "minimal"
 
-    bg = _pick("background_color", "bg", default="#0b0b0c")
-    form_card_bg = _pick("form_card_bg", "card_bg", default="rgba(255,255,255,.06)")
-    label_color = _pick("label_color", "label", default="#fafafa")
-    button_bg = _pick("button_bg", "btn_bg", default="#8ab4f8")
-    button_text = _pick("button_text", "btn_text", default="#000000")
+    bg = _pick("background_color", "bg", default="#0a0d0f")
+    form_card_bg = _pick("form_card_bg", "card_bg", default="rgba(255,255,255,.04)")
+    label_color = _pick("label_color", "label", default="#cbd5e1")
+    button_bg = _pick("button_bg", "btn_bg", default="#7fe0d6")
+    button_text = _pick("button_text", "btn_text", default="#001014")
     date = _pick("date", default="")
 
     def _bool(key: str) -> bool:
