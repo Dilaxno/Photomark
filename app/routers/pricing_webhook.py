@@ -44,11 +44,11 @@ def _normalize_plan(plan: Optional[str]) -> str:
         p = p[:-6]
     p = p.strip()
 
-    # Match by contains so variations like "photographers plan" work
-    if "photograph" in p or p in ("photo", "pg", "p"):
-        return "photographers"
-    if "agenc" in p or p in ("ag",):
-        return "agencies"
+    # Match by contains and common aliases. Map to new slugs: 'individual' | 'studios'
+    if "photograph" in p or p in ("photo", "pg", "p", "individual", "ind", "solo"):
+        return "individual"
+    if "agenc" in p or p in ("ag", "studio", "studios", "team", "teams"):
+        return "studios"
     return ""
 
 
@@ -63,7 +63,7 @@ def _allowed_plans() -> set[str]:
                 out.add(slug)
         if out:
             return out
-    return {"photographers", "agencies"}
+    return {"individual", "studios"}
 
 
 def _first_email_from_payload(payload: dict) -> str:
@@ -255,9 +255,9 @@ def _plan_from_products(obj: dict) -> str:
         pass
 
     if found_ag:
-        return "agencies"
+        return "studios"
     if found_phot:
-        return "photographers"
+        return "individual"
 
     # Fallback: try names
     for nm in names:
@@ -634,19 +634,22 @@ async def pricing_webhook(request: Request):
             pass
 
     if not plan and is_subscription:
-        # Try mapping subscription_id to plan via env; otherwise use metadata plan or default to photographers
+        # Try mapping subscription_id to plan via env; otherwise use metadata plan or product mapping
         sid = sub_id.strip()
         sid_phot = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
         sid_ag = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
         if sid and sid_ag and sid == sid_ag:
-            plan = "agencies"
+            plan = "studios"
         elif sid and sid_phot and sid == sid_phot:
-            plan = "photographers"
+            plan = "individual"
         else:
-            # Fallback to provided metadata plan (already normalized above) or default to photographers
-            plan = _normalize_plan(plan_raw) or "photographers"
+            # Prefer explicit plan from metadata/query params
+            plan = _normalize_plan(plan_raw)
+            # If still unknown, attempt to infer from products present in payload
+            if not plan:
+                plan = _plan_from_products(event_obj or {})
         try:
-            logger.info(f"[pricing.webhook] subscription detected: subscription_id={sid} resolved plan={plan}")
+            logger.info(f"[pricing.webhook] subscription detected: subscription_id={sid} resolved plan={plan or 'UNKNOWN'}")
         except Exception:
             pass
 
