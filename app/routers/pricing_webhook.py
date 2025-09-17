@@ -692,7 +692,7 @@ async def pricing_webhook(request: Request):
     # Optional: gate subscription plan upgrades by status (default allow only 'active')
     try:
         status = str((event_obj.get("status") or "")).strip().lower()
-        allowed_raw = str(os.getenv("PRICING_SUBSCRIPTION_ACTIVE_STATUSES") or "active").strip()
+        allowed_raw = str(os.getenv("PRICING_SUBSCRIPTION_ACTIVE_STATUSES") or "active,succeeded").strip()
         allowed_statuses = set([s.strip().lower() for s in allowed_raw.split(",") if s.strip()])
         if is_subscription and status and allowed_statuses and status not in allowed_statuses:
             try:
