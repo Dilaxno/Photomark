@@ -681,8 +681,9 @@ async def pricing_webhook(request: Request):
     except Exception:
         pass
 
-    # If this is not a payment.succeeded, acknowledge after caching
-    if evt_type != "payment.succeeded":
+    # Process upgrades for 'payment.succeeded' and 'subscription.active' (Dodo)
+    process_events = {"payment.succeeded", "subscription.active"}
+    if evt_type not in process_events:
         return {"ok": True, "captured": bool(ctx.get("uid") or ctx.get("plan") or ctx.get("email")), "event_type": evt_type}
 
     # Detect subscription-style payloads which may not include product_cart
