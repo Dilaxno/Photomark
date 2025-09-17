@@ -59,7 +59,7 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     var DATA = JSON.parse(dataEl.textContent);
     var inIframe = (function() {{
         try {{ return window.top !== window.self; }} catch (e) {{ return true; }}
-    })();
+    }})();
     if (inIframe) {{
         document.documentElement.style.overflow = 'hidden';
         if (document.body) document.body.style.overflow = 'hidden';
