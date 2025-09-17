@@ -57,6 +57,16 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     var dataEl = document.getElementById('pm-data');
     if(!dataEl) return;
     var DATA = JSON.parse(dataEl.textContent);
+    var inIframe = (function() {{
+        try {{ return window.top !== window.self; }} catch (e) {{ return true; }}
+    })();
+    if (inIframe) {{
+        document.documentElement.style.overflow = 'hidden';
+        if (document.body) document.body.style.overflow = 'hidden';
+    }} else {{
+        document.documentElement.style.overflow = 'auto';
+        if (document.body) document.body.style.overflow = 'auto';
+    }}
     var grid = document.getElementById('pm-grid');
     if(!grid || !DATA.photos) return;
     var frag = document.createDocumentFragment();
@@ -64,23 +74,44 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
         var card = document.createElement('div');
         card.className = 'card';
         var img = document.createElement('img');
-        img.loading = 'lazy';
+        img.loading = 'eager';
         img.decoding = 'async';
         img.src = p.url;
         img.alt = '';
+        img.addEventListener('load', sendHeight);
+        img.addEventListener('error', sendHeight);
         card.appendChild(img);
         frag.appendChild(card);
     }});
     grid.appendChild(frag);
+    sendHeight();
 
     // Auto-resize iframe height
     function sendHeight() {{
-        var h = document.documentElement.scrollHeight;
+        if (!inIframe) return;
+        var h = Math.max(
+            document.documentElement.scrollHeight,
+            document.body ? document.body.scrollHeight : 0,
+            document.documentElement.offsetHeight,
+            document.documentElement.clientHeight
+        );
         parent.postMessage({{ type: "pm-embed-height", height: h }}, "*");
     }}
+    window.addEventListener("DOMContentLoaded", sendHeight);
     window.addEventListener("load", sendHeight);
     window.addEventListener("resize", sendHeight);
     new MutationObserver(sendHeight).observe(grid, {{ childList: true, subtree: true }});
+    if (typeof ResizeObserver !== "undefined") {{
+        new ResizeObserver(sendHeight).observe(grid);
+        if (document.body) new ResizeObserver(sendHeight).observe(document.body);
+    }}
+    (function(){{
+        var t0 = Date.now();
+        var iv = setInterval(function() {{
+            sendHeight();
+            if (Date.now() - t0 > 5000) clearInterval(iv);
+        }}, 300);
+    }})();
 }})();
 </script>
 </body>
