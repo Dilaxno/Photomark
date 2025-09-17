@@ -15,7 +15,7 @@ warnings.filterwarnings(
 )
 
 # Routers
-from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading
+from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading, admin
 
 # Pricing checkout (server-side) removed in favor of client-side overlay
 
@@ -72,6 +72,8 @@ app.include_router(embed.router)
 from app.routers import upload, device  # noqa: E402
 app.include_router(upload.router)
 app.include_router(device.router)
+# admin endpoints
+app.include_router(admin.router)
 # bookings endpoints
 try:
     from app.routers import bookings  # noqa: E402
