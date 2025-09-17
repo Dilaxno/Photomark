@@ -689,6 +689,20 @@ async def pricing_webhook(request: Request):
     sub_id = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
     is_subscription = bool(sub_id and not (isinstance(event_obj.get("product_cart"), list) and event_obj.get("product_cart")))
 
+    # Optional: gate subscription plan upgrades by status (default allow only 'active')
+    try:
+        status = str((event_obj.get("status") or "")).strip().lower()
+        allowed_raw = str(os.getenv("PRICING_SUBSCRIPTION_ACTIVE_STATUSES") or "active").strip()
+        allowed_statuses = set([s.strip().lower() for s in allowed_raw.split(",") if s.strip()])
+        if is_subscription and status and allowed_statuses and status not in allowed_statuses:
+            try:
+                logger.info(f"[pricing.webhook] subscription status not active: subscription_id={sub_id} status={status} allowed={sorted(list(allowed_statuses))}")
+            except Exception:
+                pass
+            return {"ok": True, "skipped": True, "reason": "subscription_status_not_active", "status": status}
+    except Exception:
+        pass
+
     # If uid/plan missing, try reading cached context by subscription/customer/email
     if (not uid or not plan):
         try:
@@ -713,6 +727,39 @@ async def pricing_webhook(request: Request):
             pass
 
     if not plan and is_subscription:
+        # Direct mapping by product_id when present on subscription payload
+        try:
+            product_id = str((event_obj.get("product_id") or "")).strip()
+            if not product_id:
+                product_id = _deep_find_first(event_obj, ("product_id", "productId"))
+            pid_phot = (os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
+            pid_ag = (os.getenv("DODO_AGENCIES_PRODUCT_ID") or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID") or "").strip()
+            if product_id:
+                if pid_ag and product_id == pid_ag:
+                    plan = "studios"
+                elif pid_phot and product_id == pid_phot:
+                    plan = "individual"
+        except Exception:
+            pass
+
+        # Optional JSON mapping of subscription_id -> plan via env DODO_SUBSCRIPTION_PLAN_MAP
+        if not plan:
+            try:
+                sid_map_raw = (os.getenv("DODO_SUBSCRIPTION_PLAN_MAP") or "").strip()
+                if sid_map_raw:
+                    m = {}
+                    try:
+                        m = json.loads(sid_map_raw)
+                    except Exception:
+                        m = {}
+                    if isinstance(m, dict) and sub_id:
+                        v = str(m.get(sub_id) or "").strip()
+                        nv = _normalize_plan(v)
+                        if nv in _allowed_plans():
+                            plan = nv
+            except Exception:
+                pass
+
         # Try mapping subscription_id to plan via env; otherwise use metadata plan or product mapping
         sid = sub_id.strip()
         sid_phot = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
