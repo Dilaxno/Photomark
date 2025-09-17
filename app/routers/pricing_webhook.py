@@ -273,6 +273,44 @@ def _plan_from_products(obj: dict) -> str:
         if slug in allowed:
             return slug
 
+    # Hint mapping via payment_link / checkout_session identifiers when providers omit product arrays
+    try:
+        # Collect candidate identifier strings from common fields
+        candidates: list[str] = []
+        def _collect(node: object, keys: tuple[str, ...] = ("payment_link", "checkout_session_id", "payment_id"), depth: int = 0):
+            if depth > 4:
+                return
+            if isinstance(node, dict):
+                for k in keys:
+                    v = node.get(k)  # type: ignore[attr-defined]
+                    if isinstance(v, str) and v.strip():
+                        candidates.append(v.strip())
+                    elif isinstance(v, dict):
+                        vid = v.get("id") if isinstance(v.get("id"), str) else None
+                        if vid:
+                            candidates.append(str(vid))
+                # Recurse into likely wrappers
+                for kk in ("object", "data", "attributes", "details"):
+                    vv = node.get(kk)  # type: ignore[attr-defined]
+                    if isinstance(vv, (dict, list)):
+                        _collect(vv, keys, depth + 1)
+            elif isinstance(node, list):
+                for it in node[:50]:
+                    _collect(it, keys, depth + 1)
+        _collect(obj)
+        # Env-mapped identifiers for direct matching
+        pid_link_phot = (os.getenv("DODO_PHOTOGRAPHERS_PAYMENT_LINK_ID") or "").strip()
+        pid_link_ag   = (os.getenv("DODO_AGENCIES_PAYMENT_LINK_ID") or "").strip()
+        pid_chk_phot  = (os.getenv("DODO_PHOTOGRAPHERS_CHECKOUT_ID") or "").strip()
+        pid_chk_ag    = (os.getenv("DODO_AGENCIES_CHECKOUT_ID") or "").strip()
+        for c in candidates:
+            if (pid_link_ag and pid_link_ag in c) or (pid_chk_ag and pid_chk_ag in c):
+                return "studios"
+            if (pid_link_phot and pid_link_phot in c) or (pid_chk_phot and pid_chk_phot in c):
+                return "individual"
+    except Exception:
+        pass
+
     # Ultimate fallback: deep scan any string field for plan labels
     try:
         def _deep_text_scan(n, depth=0):
