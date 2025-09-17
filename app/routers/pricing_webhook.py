@@ -152,8 +152,16 @@ def _plan_from_products(obj: dict) -> str:
     one of the allowed internal slugs: 'photographers' or 'agencies'.
     """
     allowed = _allowed_plans()
-    pid_phot = (os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
-    pid_ag = (os.getenv("DODO_AGENCIES_PRODUCT_ID") or "").strip()
+    pid_phot = (
+        os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID")
+        or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID")
+        or ""
+    ).strip()
+    pid_ag = (
+        os.getenv("DODO_AGENCIES_PRODUCT_ID")
+        or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID")
+        or ""
+    ).strip()
     found_ag = False
     found_phot = False
     names: list[str] = []
@@ -264,6 +272,39 @@ def _plan_from_products(obj: dict) -> str:
         slug = _normalize_plan(nm)
         if slug in allowed:
             return slug
+
+    # Ultimate fallback: deep scan any string field for plan labels
+    try:
+        def _deep_text_scan(n, depth=0):
+            if depth > 6:
+                return ""
+            if isinstance(n, str):
+                s = n.lower()
+                if ("agenc" in s) or ("studio" in s):
+                    return "studios"
+                if ("photograph" in s) or ("individual" in s) or ("solo" in s):
+                    return "individual"
+                return ""
+            if isinstance(n, dict):
+                for v in list(n.values())[:100]:
+                    got = _deep_text_scan(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(n, list):
+                for it in n[:100]:
+                    got = _deep_text_scan(it, depth + 1)
+                    if got:
+                        return got
+            return ""
+        ds = _deep_text_scan(obj)
+        if ds and ds in allowed:
+            try:
+                logger.info(f"[pricing.webhook] deep-scan inferred plan={ds}")
+            except Exception:
+                pass
+            return ds
+    except Exception:
+        pass
     return ""
 
 
@@ -648,6 +689,9 @@ async def pricing_webhook(request: Request):
             # If still unknown, attempt to infer from products present in payload
             if not plan:
                 plan = _plan_from_products(event_obj or {})
+            # Last resort: map against full payload (some providers omit products under object)
+            if not plan and isinstance(payload, dict):
+                plan = _plan_from_products(payload)
         try:
             logger.info(f"[pricing.webhook] subscription detected: subscription_id={sid} resolved plan={plan or 'UNKNOWN'}")
         except Exception:
@@ -655,6 +699,8 @@ async def pricing_webhook(request: Request):
 
     if not plan and not is_subscription:
         plan = _plan_from_products(event_obj or {})
+        if not plan and isinstance(payload, dict):
+            plan = _plan_from_products(payload)
     if not plan or plan not in _allowed_plans():
         allowed = sorted(list(_allowed_plans()))
         return {
