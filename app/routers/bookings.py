@@ -81,6 +81,9 @@ async def get_form(request: Request):
             "submit_label": form.get("submit_label") or "Request Booking",
             "title_font_data": form.get("title_font_data") or "",
             "subtitle_font_data": form.get("subtitle_font_data") or "",
+            "label_font": form.get("label_font") or "Inter",
+            "label_size": int(form.get("label_size") or 14),
+            "label_font_data": form.get("label_font_data") or "",
             "studio_address": form.get("studio_address") or "",
             "studio_lat": form.get("studio_lat") or "",
             "studio_lng": form.get("studio_lng") or "",
@@ -131,10 +134,16 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         subtitle_size = 14
     title_font = str(payload.get("title_font") or form.get("title_font") or "Inter")
     subtitle_font = str(payload.get("subtitle_font") or form.get("subtitle_font") or "Inter")
+    label_font = str(payload.get("label_font") or form.get("label_font") or "Inter")
+    try:
+        label_size = int(payload.get("label_size") if payload.get("label_size") is not None else form.get("label_size") or 14)
+    except Exception:
+        label_size = 14
     # Submit label + custom fonts
     submit_label = str(payload.get("submit_label") or form.get("submit_label") or "Request Booking")
     title_font_data = str(payload.get("title_font_data") or form.get("title_font_data") or "")
     subtitle_font_data = str(payload.get("subtitle_font_data") or form.get("subtitle_font_data") or "")
+    label_font_data = str(payload.get("label_font_data") or form.get("label_font_data") or "")
     # Studio + Maps settings
     studio_address = str(payload.get("studio_address") or form.get("studio_address") or "")
     studio_lat = str(payload.get("studio_lat") or form.get("studio_lat") or "")
@@ -158,10 +167,13 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "subtitle_size": int(max(8, min(48, subtitle_size))),
         "title_font": str(title_font),
         "subtitle_font": str(subtitle_font),
+        "label_font": str(label_font),
+        "label_size": int(max(8, min(48, label_size))),
         "input_radius": int(max(0, min(32, input_radius))),
         "submit_label": submit_label,
         "title_font_data": title_font_data,
         "subtitle_font_data": subtitle_font_data,
+        "label_font_data": label_font_data,
         "studio_address": studio_address,
         "studio_lat": studio_lat,
         "studio_lng": studio_lng,
@@ -247,6 +259,14 @@ async def public_booking_form(form_id: str, request: Request):
         subtitle_font = str(request.query_params.get("subtitle_font") or form.get("subtitle_font") or "Inter")
     except Exception:
         subtitle_font = "Inter"
+    try:
+        label_font = str(request.query_params.get("label_font") or form.get("label_font") or "Inter")
+    except Exception:
+        label_font = "Inter"
+    try:
+        label_size = int(request.query_params.get("label_size") or form.get("label_size") or 14)
+    except Exception:
+        label_size = 14
 
     try:
         submit_label = str(request.query_params.get("submit_label") or form.get("submit_label") or "Request Booking")
@@ -276,11 +296,14 @@ async def public_booking_form(form_id: str, request: Request):
         subtitle_align=subtitle_align,
         title_size=title_size,
         subtitle_size=subtitle_size,
+        label_size=label_size,
         title_font=title_font,
         subtitle_font=subtitle_font,
+        label_font=label_font,
         submit_label=submit_label,
         title_font_data=str(form.get("title_font_data") or ""),
         subtitle_font_data=str(form.get("subtitle_font_data") or ""),
+        label_font_data=str(form.get("label_font_data") or ""),
     )
     return HTMLResponse(html)
 
@@ -305,9 +328,12 @@ def _render_modern_form_html(
     subtitle_size: int = 14,
     title_font: str = "Inter",
     subtitle_font: str = "Inter",
+    label_font: str = "Inter",
+    label_size: int = 14,
     submit_label: str = "Request Booking",
     title_font_data: str = "",
     subtitle_font_data: str = "",
+    label_font_data: str = "",
     studio_address: str = "",
     studio_lat: str = "",
     studio_lng: str = "",
@@ -320,7 +346,7 @@ def _render_modern_form_html(
         except Exception:
             return "Inter"
     families = []
-    for fam in (str(title_font), str(subtitle_font), 'Inter'):
+    for fam in (str(title_font), str(subtitle_font), str(label_font), 'Inter'):
         sf = _safe_font(fam)
         if sf and sf not in families:
             families.append(sf)
@@ -348,6 +374,16 @@ def _render_modern_form_html(
         @font-face {{
             font-family: 'CustomSubtitleFont';
             src: url({subtitle_font_data});
+            font-weight: 400 700;
+            font-style: normal;
+            font-display: swap;
+        }}
+        """
+    if label_font_data:
+        custom_fonts_css += f"""
+        @font-face {{
+            font-family: 'CustomLabelFont';
+            src: url({label_font_data});
             font-weight: 400 700;
             font-style: normal;
             font-display: swap;
@@ -410,10 +446,11 @@ def _render_modern_form_html(
         margin-bottom: 20px;
     }}
     .field label {{
-        font-size: 14px;
+        font-size: {int(max(8, min(48, label_size)))}px;
         font-weight: 500;
         margin-bottom: 6px;
         display: block;
+        font-family: {"'CustomLabelFont', " if label_font_data else ''}'{_safe_font(label_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }}
     .field input, .field textarea, .field select {{
         width: 100%;
@@ -700,8 +737,13 @@ async def preview_booking(request: Request):
         subtitle_size = int(_pick("subtitle_size", default="14"))
     except Exception:
         subtitle_size = 14
+    try:
+        label_size = int(_pick("label_size", default="14"))
+    except Exception:
+        label_size = 14
     title_font = _pick("title_font", default="Inter")
     subtitle_font = _pick("subtitle_font", default="Inter")
+    label_font = _pick("label_font", default="Inter")
 
     html = _render_modern_form_html(
         form_id="preview",
@@ -720,8 +762,10 @@ async def preview_booking(request: Request):
         subtitle_align=subtitle_align,
         title_size=title_size,
         subtitle_size=subtitle_size,
+        label_size=label_size,
         title_font=title_font,
         subtitle_font=subtitle_font,
+        label_font=label_font,
         submit_label=submit_label,
         studio_address=studio_address,
         studio_lat=studio_lat,
