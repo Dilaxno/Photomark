@@ -5,8 +5,15 @@ from fastapi.responses import JSONResponse
 import httpx
 
 from app.core.config import logger, GROQ_API_KEY
+from app.core.auth import get_uid_from_request, get_fs_client
 
 router = APIRouter(prefix="/api/mark", tags=["mark_assistant"])  # Global Mark chat assistant
+
+# Optional Firestore import for server timestamps
+try:
+    from firebase_admin import firestore as fb_fs  # type: ignore
+except Exception:
+    fb_fs = None  # type: ignore
 
 PHOTOGRAPHY_SYSTEM_PROMPT = (
     "You are Mark — a world‑class photography mentor and business coach.\n"
@@ -75,3 +82,84 @@ async def mark_chat(request: Request, body: Dict[str, Any] = Body(...)):
 
     reply = await _groq_chat(safe_msgs)
     return {"reply": reply}
+
+
+# ---------------- Chat persistence (Firestore) ----------------
+
+def _messages_collection(db, uid: str, chat_id: str):
+    return (
+        db.collection('users')
+          .document(uid)
+          .collection('chats')
+          .document(chat_id)
+          .collection('messages')
+    )
+
+
+@router.post("/chats/{chat_id}/messages")
+async def mark_add_message(request: Request, chat_id: str, body: Dict[str, Any] = Body(...)):
+    """Add a new message to a user's chat.
+    Path: users/{uid}/chats/{chatId}/messages/{messageId}
+    Body: { sender: 'user' | 'Mark Photography Expert', text: string }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    sender = str((body or {}).get('sender') or '').strip()
+    text = str((body or {}).get('text') or '').strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    # Normalize sender to allowed set
+    if sender.lower() in ("user", "me"):
+        sender_norm = "user"
+    else:
+        sender_norm = "Mark Photography Expert"
+
+    db = get_fs_client()
+    if not db or not fb_fs:
+        return JSONResponse({"error": "firestore unavailable"}, status_code=503)
+    try:
+        doc = {
+            "sender": sender_norm,
+            "text": text,
+            "timestamp": fb_fs.SERVER_TIMESTAMP,  # type: ignore
+        }
+        ref = _messages_collection(db, uid, chat_id).document()
+        ref.set(doc, merge=False)
+        return {"ok": True, "id": ref.id}
+    except Exception as ex:
+        logger.warning(f"mark_add_message failed: {ex}")
+        return JSONResponse({"error": "write_failed"}, status_code=500)
+
+
+@router.get("/chats/{chat_id}/messages")
+async def mark_fetch_messages(request: Request, chat_id: str):
+    """Fetch all messages for a chatId ordered by timestamp ascending."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    db = get_fs_client()
+    if not db or not fb_fs:
+        return JSONResponse({"error": "firestore unavailable"}, status_code=503)
+    try:
+        q = _messages_collection(db, uid, chat_id).order_by('timestamp', direction=fb_fs.Query.ASCENDING)  # type: ignore
+        out: List[Dict[str, Any]] = []
+        for snap in q.stream():  # type: ignore[attr-defined]
+            data = snap.to_dict() or {}
+            ts = data.get('timestamp')
+            # Normalize timestamp to ISO if available
+            try:
+                if ts is not None and hasattr(ts, 'isoformat'):
+                    data['timestamp'] = ts.isoformat()
+            except Exception:
+                pass
+            out.append({
+                "id": getattr(snap, 'id', None),
+                "sender": data.get('sender') or '',
+                "text": data.get('text') or '',
+                "timestamp": data.get('timestamp') or None,
+            })
+        return {"messages": out}
+    except Exception as ex:
+        logger.warning(f"mark_fetch_messages failed: {ex}")
+        return JSONResponse({"error": "read_failed"}, status_code=500)
