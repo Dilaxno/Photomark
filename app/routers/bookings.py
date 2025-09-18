@@ -3,10 +3,12 @@ from fastapi.responses import HTMLResponse
 from typing import Optional, Dict, Any, List
 import uuid
 import time
+import os
 from string import Template
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.auth import get_fs_client as _get_fs_client
+from app.core.auth import get_user_email_from_uid
 from app.utils.emailing import render_email, send_email_smtp
 from app.core.config import logger
 from app.utils.storage import read_json_key, write_json_key
@@ -462,6 +464,65 @@ async def submit_booking(
         items.insert(0, lite)
         idx["items"] = items[:1000]
         write_json_key(_user_bookings_index_key(uid), idx)
+        # Notify photographer/owner by email (best-effort)
+        try:
+            owner_email = (get_user_email_from_uid(uid) or '').strip()
+            if not owner_email:
+                try:
+                    db = _get_fs_client()
+                    if db is not None:
+                        snap = db.collection('users').document(uid).get()
+                        if getattr(snap, 'exists', False):
+                            data = snap.to_dict() or {}
+                            owner_email = str(data.get('email') or '').strip()
+                except Exception:
+                    pass
+            if owner_email:
+                subject = f"New booking request from {client_name or email}"
+                front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                dash_url = f"{front}/#booking"
+                # Simple HTML escaping
+                def esc(s: str) -> str:
+                    try:
+                        return str(s).replace('<', '&lt;').replace('>', '&gt;')
+                    except Exception:
+                        return str(s)
+                intro = (
+                    "A new booking request was submitted via your form.<br><br>"
+                    f"<strong>Name:</strong> {esc(client_name)}<br>"
+                    f"<strong>Email:</strong> <a href='mailto:{email}'>{esc(email)}</a><br>"
+                    f"<strong>Phone:</strong> {esc(phone)}<br>"
+                    f"<strong>Date:</strong> {esc(date)}<br>"
+                    f"<strong>Payment:</strong> {esc(record.get('payment_option'))}<br>"
+                )
+                if record.get('location'):
+                    intro += f"<strong>Location:</strong> {esc(record.get('location'))}<br>"
+                if service_details:
+                    intro += f"<strong>Message:</strong><br>{esc(service_details)}"
+                html = render_email(
+                    "email_basic.html",
+                    title="New booking request",
+                    intro=intro,
+                    button_label="Open Booking",
+                    button_url=dash_url,
+                    footer_note=f"Request ID: {booking_id}",
+                )
+                text = (
+                    "New booking request\n"
+                    f"Name: {client_name}\n"
+                    f"Email: {email}\n"
+                    f"Phone: {phone}\n"
+                    f"Date: {date}\n"
+                    f"Payment: {record.get('payment_option')}\n"
+                    + (f"Location: {record.get('location')}\n" if record.get('location') else "")
+                    + (f"Message: {service_details}\n" if service_details else "")
+                )
+                try:
+                    send_email_smtp(owner_email, subject, html, text, reply_to=email)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return {"ok": True, "id": booking_id}
     except Exception as ex:
         logger.exception(f"booking submit failed: {ex}")
