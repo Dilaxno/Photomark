@@ -35,3 +35,4 @@ cryptography==42.0.8
 # Utilities used by scripts and webhooks
 gdown==5.2.0
 standardwebhooks==1.0.0
+qrcode==7.4.2
