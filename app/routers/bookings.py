@@ -135,6 +135,17 @@ async def public_booking_form(form_id: str, request: Request):
         default_date = str(request.query_params.get("date") or "").strip()
     except Exception:
         default_date = ""
+    # Flags
+    def _qp_bool(key: str) -> bool:
+        try:
+            v = request.query_params.get(key)
+            return bool(str(v).lower() in ("1","true","yes","on")) if v is not None else False
+        except Exception:
+            return False
+
+    full_form = _qp_bool("full_form")
+    no_cta = _qp_bool("no_cta")
+
     html = _render_public_form_html(
         form_id,
         bg,
@@ -145,250 +156,158 @@ async def public_booking_form(form_id: str, request: Request):
         button_text=button_text,
         hide_payment_option=hide_payment_option,
         allow_in_studio=allow_in_studio,
+        full_form=full_form,
+        no_cta=no_cta,
     )
     return HTMLResponse(html)
 
 
-def _render_public_form_html(
+def _render_modern_form_html(
     form_id: str,
-    bg: str,
     default_date: str = "",
     *,
-    form_card_bg: str = "rgba(255,255,255,.04)",
-    label_color: str = "#cbd5e1",
-    button_bg: str = "#7fe0d6",
-    button_text: str = "#001014",
-    hide_payment_option: bool = False,
+    accent: str = "#111827",       # dark gray text
+    bg: str = "#ffffff",           # light/white background
+    card_bg: str = "#f9fafb",      # light gray card
+    accent_button: str = "#111827",
+    accent_button_text: str = "#ffffff",
     allow_in_studio: bool = False,
+    hide_payment_option: bool = False,
 ) -> str:
-    # Use Template to avoid f-string brace issues with CSS/JS
-    css_tpl = Template(
-        """
-    :root{--pm-accent:#8ab4f8}
-    *{box-sizing:border-box}
-    body{margin:0;background:${bg};color:#fafafa;font-family:'Outfit', -apple-system, system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial}
-    .container{max-width:720px;margin:0 auto;padding:20px}
-    h1{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}
-    .card{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:${form_card_bg};padding:16px}
-    label{display:block;font-size:12px;color:${label_color};margin:10px 0 6px}
-    input,textarea,select{width:100%;background:rgba(0,0,0,.3);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px}
-    button{display:inline-flex;align-items:center;gap:8px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}
-    .row{display:grid;gap:10px;grid-template-columns:1fr}
-    @media(min-width:640px){.row{grid-template-columns:1fr 1fr}}
-    .note{font-size:12px;opacity:.75;margin-top:8px}
-    .ok{background:#10b981;color:#001}
-    .err{background:#ef4444;color:#fff}
-        """.strip()
-    )
-    # Base CSS for the split layout
-    css = css_tpl.substitute(
-        bg=bg,
-        form_card_bg=form_card_bg,
-        label_color=label_color,
-        button_bg=button_bg,
-        button_text=button_text,
-    ) + "\n" + Template(
-        """
-        .container{max-width:980px;display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}
-        @media(max-width:980px){.container{display:block}}
-        .hero{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
-        .hero .pill{display:inline-block;border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:6px 12px;font-size:12px;opacity:.9;margin-bottom:10px}
-        .hero h1{font-size:clamp(28px,5vw,44px);font-weight:800;letter-spacing:-.02em;margin:0 0 10px}
-        .hero .sub{opacity:.85;max-width:46ch;line-height:1.5}
-        .hero .cta{display:inline-flex;margin-top:18px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 16px;border-radius:12px;text-decoration:none}
-        .form-card{border:1px solid rgba(255,255,255,.12);border-radius:20px;background:${form_card_bg};padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
-        .form-title{font-size:16px;font-weight:600;margin-bottom:16px}
-        .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-        @media(max-width:640px){.grid-2{grid-template-columns:1fr}}
-        .field{margin:10px 0}
-        .field label{font-size:12px;color:${label_color};display:block;margin-bottom:6px}
-        .field input,.field textarea,.field select{width:100%;background:transparent;color:#fff;border:0;border-bottom:1px solid rgba(255,255,255,.14);border-radius:0;padding:10px 0}
-        .field textarea{resize:vertical}
-        .actions{margin-top:16px}
-        .actions button{background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0}
-        """
-    ).substitute(
-        form_card_bg=form_card_bg,
-        label_color=label_color,
-        button_bg=button_bg,
-        button_text=button_text,
-    )
+    css = f"""
+    * {{ box-sizing: border-box; }}
+    body {{
+        margin: 0;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: {bg};
+        color: {accent};
+        line-height: 1.6;
+        padding: 40px 20px;
+    }}
+    .container {{
+        max-width: 600px;
+        margin: 0 auto;
+    }}
+    h1 {{
+        font-size: 28px;
+        font-weight: 600;
+        margin-bottom: 24px;
+        text-align: center;
+    }}
+    .form-card {{
+        background: {card_bg};
+        border-radius: 16px;
+        padding: 32px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    }}
+    .field {{
+        margin-bottom: 20px;
+    }}
+    .field label {{
+        font-size: 14px;
+        font-weight: 500;
+        margin-bottom: 6px;
+        display: block;
+    }}
+    .field input, .field textarea, .field select {{
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid #d1d5db;
+        border-radius: 10px;
+        background: #fff;
+        font-size: 15px;
+        transition: border 0.2s;
+    }}
+    .field input:focus, .field textarea:focus, .field select:focus {{
+        outline: none;
+        border-color: {accent};
+    }}
+    button {{
+        width: 100%;
+        background: {accent_button};
+        color: {accent_button_text};
+        font-weight: 600;
+        border: none;
+        padding: 14px;
+        border-radius: 10px;
+        font-size: 16px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }}
+    button:hover {{
+        background: #000;
+    }}
+    .note {{
+        text-align: center;
+        margin-top: 16px;
+        font-size: 14px;
+        opacity: 0.8;
+    }}
+    """
 
-    # Prepare conditional payment option HTML
-    payment_html = "" if hide_payment_option else (
-        """
-              <div>
-                <label>Payment option</label>
-                <select name='payment_option'>
-                  <option value='online'>Online</option>
-                  <option value='offline'>Offline</option>
-                </select>
-              </div>
-        """
-    )
+    payment_html = "" if hide_payment_option else """
+        <div class='field'>
+            <label>Payment Option</label>
+            <select name='payment_option'>
+                <option value='online'>Online</option>
+                <option value='offline'>Offline</option>
+            </select>
+        </div>
+    """
 
-    # Prepare optional studio toggle
     studio_html = (
-        '<label style="display:flex;align-items:center;gap:8px;margin-top:8px">'
-        '<input type="checkbox" id="pm_studio" /> In studio'
-        '</label>'
-    ) if allow_in_studio else ''
-
-    # Single split layout content
-    content_html = Template(
-        """
-    <div class='container'>
-      <section class='hero'>
-        <div class='pill'>Book</div>
-        <h1>Book Your Photography Session!</h1>
-        <p class='sub'>Have a special moment to capture? We'd love to hear from you. Reach out anytime and let's create something beautiful together.</p>
-        <a href='#form' class='cta'>Book Now</a>
-      </section>
-      <section class='form-card' id='form'>
-        <div class='form-title'>Book Your Session</div>
-        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
-          <input type='hidden' name='form_id' value='${form_id}' />
-          <input type='hidden' name='client_name' id='pm_cn' />
-          <input type='hidden' name='latitude' id='pm_lat' />
-          <input type='hidden' name='longitude' id='pm_lon' />
-          <div class='grid-2'>
-            <div class='field'>
-              <label>First Name</label>
-              <input id='pm_fn' placeholder='John' />
-            </div>
-            <div class='field'>
-              <label>Last Name</label>
-              <input id='pm_ln' placeholder='Doe' />
-            </div>
-          </div>
-          <div class='grid-2'>
-            <div class='field'>
-              <label>Phone</label>
-              <input name='phone' placeholder='+1 777 888 999' required />
-            </div>
-            <div class='field'>
-              <label>Email Address</label>
-              <input name='email' type='email' placeholder='you@example.com' required />
-            </div>
-          </div>
-          <div class='field'>
-            <label>Message</label>
-            <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
-          </div>
-          <div class='grid-2'>
-            <div class='field'>
-              <label>Preferred date</label>
-              <input name='date' type='date' required value='${default_date}' />
-            </div>
-            ${payment_html}
-          </div>
-          ${studio_html}
-          <div class='actions'>
-            <button type='submit'>Submit</button>
-            <div id='msg' class='note' style='display:inline-block;margin-left:10px'></div>
-          </div>
-        </form>
-      </section>
-    </div>
-        """
-    ).substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
-
-    html_tpl = Template(
-        """<!doctype html>
-<html>
-  <head>
-    <meta charset='utf-8'/>
-    <meta name='viewport' content='width=device-width,initial-scale=1'/>
-    <title>Booking</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com"/>
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
-    <style>${css}</style>
-  </head>
-  <body>
-    ${content}
-    <script>
-      // Geolocation: best-effort, fills hidden lat/lon and a simple location string
-      (function(){
-        try {
-          if (!navigator.geolocation) return;
-          navigator.geolocation.getCurrentPosition(function(pos){
-            try {
-              var lat = (pos && pos.coords && pos.coords.latitude) ? pos.coords.latitude.toFixed(6) : '';
-              var lon = (pos && pos.coords && pos.coords.longitude) ? pos.coords.longitude.toFixed(6) : '';
-              var latEl = document.getElementById('pm_lat');
-              var lonEl = document.getElementById('pm_lon');
-              var locEl = document.getElementById('pm_location');
-              if (latEl) latEl.value = lat;
-              if (lonEl) lonEl.value = lon;
-              if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
-            } catch(e) {}
-          });
-        } catch(e) {}
-      })();
-      (function(){
-        try {
-          var studio = document.getElementById('pm_studio');
-          var locEl = document.getElementById('pm_location');
-          var latEl = document.getElementById('pm_lat');
-          var lonEl = document.getElementById('pm_lon');
-          if (!studio) return;
-          var apply = function(){
-            if (!studio || !locEl) return;
-            if (studio.checked){
-              if (locEl) locEl.value = 'In studio';
-              if (latEl) latEl.value = '';
-              if (lonEl) lonEl.value = '';
-              if (locEl) locEl.setAttribute('readonly', 'readonly');
-            } else {
-              if (locEl && locEl.value === 'In studio') locEl.value = '';
-              if (locEl) locEl.removeAttribute('readonly');
-            }
-          };
-          studio.addEventListener('change', apply);
-          apply();
-        } catch(e) {}
-      })();
-      async function onSubmit(e){
-        e.preventDefault();
-        const form = e.target;
-        const msg = document.getElementById('msg');
-        msg.textContent = 'Submitting...';
-        msg.className = 'note';
-        try{
-          // Compose client_name if split fields are present
-          try{
-            const fn = document.getElementById('pm_fn');
-            const ln = document.getElementById('pm_ln');
-            const cn = document.getElementById('pm_cn');
-            if (cn) {
-              const v = [fn && fn.value || '', ln && ln.value || ''].filter(Boolean).join(' ').trim();
-              if (v) cn.value = v;
-            }
-          } catch(_e){}
-          const fd = new FormData(form);
-          const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
-          const data = await res.json().catch(()=>({}));
-          if(!res.ok || data.error) throw new Error(data.error || 'Error');
-          msg.textContent = 'Thanks! We have received your request.';
-          msg.className = 'note ok';
-          form.reset();
-        }catch(err){
-          msg.textContent = err.message || 'Could not submit';
-          msg.className = 'note err';
-        }
-        return false;
-      }
-    </script>
-  </body>
-</html>"""
+        "<div class='field'><label><input type='checkbox' name='studio'/> In studio</label></div>"
+        if allow_in_studio else ""
     )
 
-    html = html_tpl.substitute(
-        css=css,
-        content=content_html,
-    )
+    html = f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset='utf-8'/>
+        <meta name='viewport' content='width=device-width,initial-scale=1'/>
+        <title>Book a Session</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+        <style>{css}</style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Book Your Photography Session</h1>
+          <div class="form-card">
+            <form method='POST' action='/api/booking/submit' onsubmit='return onSubmit(event)'>
+              <input type='hidden' name='form_id' value='{form_id}'/>
+              <div class='field'>
+                <label>Name</label>
+                <input name='client_name' placeholder='Your full name' required/>
+              </div>
+              <div class='field'>
+                <label>Email</label>
+                <input name='email' type='email' placeholder='you@example.com' required/>
+              </div>
+              <div class='field'>
+                <label>Phone</label>
+                <input name='phone' placeholder='+1 777 888 999' required/>
+              </div>
+              <div class='field'>
+                <label>Preferred Date</label>
+                <input type='date' name='date' value='{default_date}' required/>
+              </div>
+              <div class='field'>
+                <label>Message</label>
+                <textarea name='service_details' rows='4' placeholder='What kind of session are you interested in?'></textarea>
+              </div>
+              {payment_html}
+              {studio_html}
+              <button type='submit'>Request Booking</button>
+              <div id='msg' class='note'></div>
+            </form>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
     return html
+
 
 
 @router.get("/preview")
@@ -419,6 +338,8 @@ async def preview_booking(request: Request):
 
     hide_payment_option = _bool("hide_payment_option")
     allow_in_studio = _bool("allow_in_studio")
+    full_form = _bool("full_form")
+    no_cta = _bool("no_cta")
 
     html = _render_public_form_html(
         form_id="preview",
@@ -430,6 +351,8 @@ async def preview_booking(request: Request):
         button_text=button_text,
         hide_payment_option=hide_payment_option,
         allow_in_studio=allow_in_studio,
+        full_form=full_form,
+        no_cta=no_cta,
     )
     return HTMLResponse(html)
 
