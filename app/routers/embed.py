@@ -43,7 +43,15 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     :root {{ color-scheme: {cs}; }}
     html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
-    .grid {{ column-count: 2; column-gap: 0; }}
+    .grid {{
+    column-count: 2;
+    column-gap: 12px;
+    padding: 0;       
+}}
+
+.card {{
+    margin: 0 0 12px; /* only bottom margin */
+}}
     @media (min-width: 1024px) {{ .grid {{ column-count: 4; }} }}
     .card {{ display:inline-block; width:100%; margin:0; border:none; border-radius:0; overflow:hidden; background:{card_bg}; break-inside: avoid; }}
     .card img {{width: 100%;
