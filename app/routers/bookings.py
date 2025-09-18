@@ -78,6 +78,10 @@ async def get_form(request: Request):
             "title_font": form.get("title_font") or "Inter",
             "subtitle_font": form.get("subtitle_font") or "Inter",
             "input_radius": int(form.get("input_radius") or 10),
+            "studio_address": form.get("studio_address") or "",
+            "studio_lat": form.get("studio_lat") or "",
+            "studio_lng": form.get("studio_lng") or "",
+            "maps_api_key": form.get("maps_api_key") or "",
             "updated_at": int(time.time()),
         }
         write_json_key(_user_form_key(eff_uid), form)
@@ -124,6 +128,11 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         subtitle_size = 14
     title_font = str(payload.get("title_font") or form.get("title_font") or "Inter")
     subtitle_font = str(payload.get("subtitle_font") or form.get("subtitle_font") or "Inter")
+    # Studio + Maps settings
+    studio_address = str(payload.get("studio_address") or form.get("studio_address") or "")
+    studio_lat = str(payload.get("studio_lat") or form.get("studio_lat") or "")
+    studio_lng = str(payload.get("studio_lng") or form.get("studio_lng") or "")
+    maps_api_key = str(payload.get("maps_api_key") or form.get("maps_api_key") or "")
     # template removed
 
     form.update({
@@ -143,6 +152,10 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "title_font": str(title_font),
         "subtitle_font": str(subtitle_font),
         "input_radius": int(max(0, min(32, input_radius))),
+        "studio_address": studio_address,
+        "studio_lat": studio_lat,
+        "studio_lng": studio_lng,
+        "maps_api_key": maps_api_key,
         "updated_at": int(time.time()),
     })
     write_json_key(_user_form_key(eff_uid), form)
@@ -225,6 +238,12 @@ async def public_booking_form(form_id: str, request: Request):
     except Exception:
         subtitle_font = "Inter"
 
+    # Studio/maps from saved form or query overrides
+    maps_api_key = str(request.query_params.get("maps_api_key") or form.get("maps_api_key") or "")
+    studio_address = str(request.query_params.get("studio_address") or form.get("studio_address") or "")
+    studio_lat = str(request.query_params.get("studio_lat") or form.get("studio_lat") or "")
+    studio_lng = str(request.query_params.get("studio_lng") or form.get("studio_lng") or "")
+
     html = _render_modern_form_html(
         form_id=form_id,
         default_date=default_date,
@@ -268,6 +287,10 @@ def _render_modern_form_html(
     subtitle_size: int = 14,
     title_font: str = "Inter",
     subtitle_font: str = "Inter",
+    studio_address: str = "",
+    studio_lat: str = "",
+    studio_lng: str = "",
+    maps_api_key: str = "",
 ) -> str:
     # Build Google Fonts link tags for requested families (simple sanitization)
     def _safe_font(f: str) -> str:
@@ -284,6 +307,8 @@ def _render_modern_form_html(
         f'<link href="https://fonts.googleapis.com/css2?family={fn.replace(" ", "+")}:wght@400;600&display=swap" rel="stylesheet"/>'
         for fn in families
     ])
+
+    maps_script = f"<script src=\"https://maps.googleapis.com/maps/api/js?key={maps_api_key}&libraries=places\"></script>" if maps_api_key else ""
 
     css = f"""
     * {{ box-sizing: border-box; }}
@@ -323,6 +348,19 @@ def _render_modern_form_html(
         border-radius: 16px;
         padding: 32px;
         box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    }}
+    .map-wrap {{
+        margin-top: 8px;
+    }}
+    #map {{
+        width: 100%;
+        height: 240px;
+        border-radius: 12px;
+        border: 1px solid #d1d5db;
+    }}
+    .muted {{
+        color: #6b7280;
+        font-size: 13px;
     }}
     .field {{
         margin-bottom: 20px;
@@ -390,6 +428,7 @@ def _render_modern_form_html(
         <meta name='viewport' content='width=device-width,initial-scale=1'/>
         <title>{title_text}</title>
         {font_links}
+        {maps_script}
         <style>{css}</style>
       </head>
       <body>
@@ -422,11 +461,136 @@ def _render_modern_form_html(
                 <textarea name='service_details' rows='4' placeholder='What kind of session are you interested in?'></textarea>
               </div>
               {payment_html}
-              {studio_html}
+              <div class='field'>
+                <label>Location</label>
+                <div>
+                  {"" if not allow_in_studio else "<label style='margin-right:12px'><input type='checkbox' id='inStudio'/> In studio</label>"}
+                  <label><input type='checkbox' id='customLoc'/> Custom location</label>
+                </div>
+                <input id='placeInput' type='text' placeholder='Type a place or address' style='display:none;margin-top:8px;width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px' />
+                <div class='map-wrap'><div id='map'></div></div>
+                <div class='muted'>Pick a location or choose In studio.</div>
+                <input type='hidden' name='location' id='locField'/>
+                <input type='hidden' name='latitude' id='latField'/>
+                <input type='hidden' name='longitude' id='lngField'/>
+              </div>
               <button type='submit'>Request Booking</button>
               <div id='msg' class='note'></div>
             </form>
           </div>
+          <script>
+            (function() {{
+              let map = null, marker = null, autocomplete = null;
+              const inStudioCb = document.getElementById('inStudio');
+              const customCb = document.getElementById('customLoc');
+              const placeInput = document.getElementById('placeInput');
+              const locField = document.getElementById('locField');
+              const latField = document.getElementById('latField');
+              const lngField = document.getElementById('lngField');
+              const studio = {{
+                address: {repr(studio_address)},
+                lat: parseFloat({repr(studio_lat)}) || null,
+                lng: parseFloat({repr(studio_lng)}) || null,
+              }};
+
+              function setMarker(pos, title) {{
+                if (!map) return;
+                if (!marker) marker = new google.maps.Marker({{ map }});
+                marker.setPosition(pos);
+                if (title) marker.setTitle(title);
+                map.setCenter(pos);
+              }}
+
+              function useStudio() {{
+                if (studio.lat && studio.lng) {{
+                  const pos = {{ lat: studio.lat, lng: studio.lng }};
+                  setMarker(pos, studio.address || 'Studio');
+                  locField.value = studio.address || 'Studio';
+                  latField.value = String(studio.lat);
+                  lngField.value = String(studio.lng);
+                }} else {{
+                  // No studio set — clear fields
+                  locField.value = '';
+                  latField.value = '';
+                  lngField.value = '';
+                }}
+              }}
+
+              window.onSubmit = function(e) {{
+                // Validate: if custom is checked ensure coords present
+                if (customCb && customCb.checked) {{
+                  if (!latField.value || !lngField.value) {{
+                    e.preventDefault();
+                    alert('Please select a custom location on the map.');
+                    return false;
+                  }}
+                }}
+                return true;
+              }}
+
+              function init() {{
+                const mapEl = document.getElementById('map');
+                if (!mapEl) return;
+                const hasMaps = !!(window.google && window.google.maps);
+                const start = {{ lat: 37.7749, lng: -122.4194 }}; // fallback
+                map = hasMaps ? new google.maps.Map(mapEl, {{ center: start, zoom: 12 }}) : null;
+                if (hasMaps) {{ marker = new google.maps.Marker({{ map }}); }}
+
+                if (hasMaps && placeInput) {{
+                  autocomplete = new google.maps.places.Autocomplete(placeInput, {{ fields: ['formatted_address','geometry'] }});
+                  autocomplete.addListener('place_changed', () => {{
+                    const p = autocomplete.getPlace();
+                    if (p && p.geometry && p.geometry.location) {{
+                      const pos = {{ lat: p.geometry.location.lat(), lng: p.geometry.location.lng() }};
+                      setMarker(pos, p.formatted_address || 'Location');
+                      locField.value = p.formatted_address || '';
+                      latField.value = String(pos.lat);
+                      lngField.value = String(pos.lng);
+                    }}
+                  }});
+                }}
+
+                if (inStudioCb) {{
+                  inStudioCb.addEventListener('change', () => {{
+                    if (inStudioCb.checked) {{
+                      if (customCb) customCb.checked = false;
+                      placeInput && (placeInput.style.display = 'none');
+                      useStudio();
+                    }} else {{
+                      // Cleared
+                      if (!customCb || !customCb.checked) {{
+                        locField.value = latField.value = lngField.value = '';
+                      }}
+                    }}
+                  }});
+                }}
+
+                if (customCb) {{
+                  customCb.addEventListener('change', () => {{
+                    if (customCb.checked) {{
+                      if (inStudioCb) inStudioCb.checked = false;
+                      placeInput && (placeInput.style.display = 'block');
+                      placeInput && placeInput.focus();
+                      // Clear until user picks
+                      locField.value = latField.value = lngField.value = '';
+                    }} else {{
+                      placeInput && (placeInput.style.display = 'none');
+                      if (!inStudioCb || !inStudioCb.checked) {{
+                        locField.value = latField.value = lngField.value = '';
+                      }}
+                    }}
+                  }});
+                }}
+
+                // Initialize default selection
+                if (inStudioCb && inStudioCb.checked) useStudio();
+              }}
+
+              if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', init);
+              }} else {{ init(); }}
+            }})();
+          </script>
         </div>
       </body>
     </html>
@@ -473,6 +637,11 @@ async def preview_booking(request: Request):
     except Exception:
         input_radius = 10
 
+    maps_api_key = _pick("maps_api_key", default="")
+    studio_address = _pick("studio_address", default="")
+    studio_lat = _pick("studio_lat", default="")
+    studio_lng = _pick("studio_lng", default="")
+
     # Appearance (title/subtitle)
     _ta = _pick("title_align", default="center").lower()
     title_align = _ta if _ta in ("left","center","right") else "center"
@@ -508,6 +677,10 @@ async def preview_booking(request: Request):
         subtitle_size=subtitle_size,
         title_font=title_font,
         subtitle_font=subtitle_font,
+        studio_address=studio_address,
+        studio_lat=studio_lat,
+        studio_lng=studio_lng,
+        maps_api_key=maps_api_key,
     )
     return HTMLResponse(html)
 
