@@ -233,7 +233,13 @@ def _read_vault(uid: str, vault: str) -> list[str]:
     try:
         if s3 and R2_BUCKET:
             obj = s3.Object(R2_BUCKET, key)
-            body = obj.get()["Body"].read().decode("utf-8")
+            try:
+                body = obj.get()["Body"].read().decode("utf-8")
+            except ClientError as ce:
+                # Treat missing object as empty vault without warning noise
+                if ce.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+                    return []
+                raise
             data = json.loads(body)
         else:
             path = os.path.join(STATIC_DIR, key)
