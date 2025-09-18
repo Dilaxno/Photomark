@@ -71,6 +71,12 @@ async def get_form(request: Request):
             "allow_in_studio": bool(form.get("allow_in_studio") or False),
             "title": form.get("title") or "Book a Photoshoot",
             "subtitle": form.get("subtitle") or "Fill this form here",
+            "title_align": form.get("title_align") or "center",
+            "subtitle_align": form.get("subtitle_align") or "center",
+            "title_size": int(form.get("title_size") or 28),
+            "subtitle_size": int(form.get("subtitle_size") or 14),
+            "title_font": form.get("title_font") or "Inter",
+            "subtitle_font": form.get("subtitle_font") or "Inter",
             "input_radius": int(form.get("input_radius") or 10),
             "updated_at": int(time.time()),
         }
@@ -104,6 +110,20 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     title = payload.get("title") or form.get("title") or "Book a Photoshoot"
     subtitle = payload.get("subtitle") or form.get("subtitle") or "Fill this form here"
     input_radius = int(payload.get("input_radius") if payload.get("input_radius") is not None else form.get("input_radius") or 10)
+    title_align = str(payload.get("title_align") or form.get("title_align") or "center").lower()
+    if title_align not in ("left","center","right"): title_align = "center"
+    subtitle_align = str(payload.get("subtitle_align") or form.get("subtitle_align") or "center").lower()
+    if subtitle_align not in ("left","center","right"): subtitle_align = "center"
+    try:
+        title_size = int(payload.get("title_size") if payload.get("title_size") is not None else form.get("title_size") or 28)
+    except Exception:
+        title_size = 28
+    try:
+        subtitle_size = int(payload.get("subtitle_size") if payload.get("subtitle_size") is not None else form.get("subtitle_size") or 14)
+    except Exception:
+        subtitle_size = 14
+    title_font = str(payload.get("title_font") or form.get("title_font") or "Inter")
+    subtitle_font = str(payload.get("subtitle_font") or form.get("subtitle_font") or "Inter")
     # template removed
 
     form.update({
@@ -116,6 +136,12 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "allow_in_studio": bool(allow_in_studio),
         "title": str(title),
         "subtitle": str(subtitle),
+        "title_align": title_align,
+        "subtitle_align": subtitle_align,
+        "title_size": int(max(8, min(96, title_size))),
+        "subtitle_size": int(max(8, min(48, subtitle_size))),
+        "title_font": str(title_font),
+        "subtitle_font": str(subtitle_font),
         "input_radius": int(max(0, min(32, input_radius))),
         "updated_at": int(time.time()),
     })
@@ -171,6 +197,34 @@ async def public_booking_form(form_id: str, request: Request):
     except Exception:
         subtitle_text = "Fill this form here"
 
+    # Title/subtitle appearance overrides
+    try:
+        title_align = str(request.query_params.get("title_align") or form.get("title_align") or "center").lower()
+        if title_align not in ("left","center","right"): title_align = "center"
+    except Exception:
+        title_align = "center"
+    try:
+        subtitle_align = str(request.query_params.get("subtitle_align") or form.get("subtitle_align") or "center").lower()
+        if subtitle_align not in ("left","center","right"): subtitle_align = "center"
+    except Exception:
+        subtitle_align = "center"
+    try:
+        title_size = int(request.query_params.get("title_size") or form.get("title_size") or 28)
+    except Exception:
+        title_size = 28
+    try:
+        subtitle_size = int(request.query_params.get("subtitle_size") or form.get("subtitle_size") or 14)
+    except Exception:
+        subtitle_size = 14
+    try:
+        title_font = str(request.query_params.get("title_font") or form.get("title_font") or "Inter")
+    except Exception:
+        title_font = "Inter"
+    try:
+        subtitle_font = str(request.query_params.get("subtitle_font") or form.get("subtitle_font") or "Inter")
+    except Exception:
+        subtitle_font = "Inter"
+
     html = _render_modern_form_html(
         form_id=form_id,
         default_date=default_date,
@@ -184,6 +238,12 @@ async def public_booking_form(form_id: str, request: Request):
         allow_in_studio=allow_in_studio,
         hide_payment_option=hide_payment_option,
         input_radius=input_radius,
+        title_align=title_align,
+        subtitle_align=subtitle_align,
+        title_size=title_size,
+        subtitle_size=subtitle_size,
+        title_font=title_font,
+        subtitle_font=subtitle_font,
     )
     return HTMLResponse(html)
 
@@ -202,7 +262,29 @@ def _render_modern_form_html(
     allow_in_studio: bool = False,
     hide_payment_option: bool = False,
     input_radius: int = 10,
+    title_align: str = "center",
+    subtitle_align: str = "center",
+    title_size: int = 28,
+    subtitle_size: int = 14,
+    title_font: str = "Inter",
+    subtitle_font: str = "Inter",
 ) -> str:
+    # Build Google Fonts link tags for requested families (simple sanitization)
+    def _safe_font(f: str) -> str:
+        try:
+            return "".join(ch for ch in f if ch.isalnum() or ch in (" ", "+", "-")) or "Inter"
+        except Exception:
+            return "Inter"
+    families = []
+    for fam in {repr(title_font)}, {repr(subtitle_font)}, {repr('Inter')}:
+        sf = _safe_font(fam)
+        if sf not in families:
+            families.append(sf)
+    font_links = "\n        ".join([
+        f'<link href="https://fonts.googleapis.com/css2?family={fn.replace(" ", "+")}:wght@400;600&display=swap" rel="stylesheet"/>'
+        for fn in families
+    ])
+
     css = f"""
     * {{ box-sizing: border-box; }}
     body {{
@@ -217,11 +299,24 @@ def _render_modern_form_html(
         max-width: 600px;
         margin: 0 auto;
     }}
+    .title-card {{
+        background: {card_bg};
+        border-radius: 16px;
+        padding: 20px 24px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+        margin-bottom: 20px;
+    }}
     h1 {{
-        font-size: 28px;
+        font-size: {int(max(8, min(96, title_size)))}px;
         font-weight: 600;
-        margin-bottom: 24px;
-        text-align: center;
+        margin: 0 0 8px 0;
+        text-align: {title_align};
+        font-family: '{_safe_font(title_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }}
+    .subtitle {{
+        text-align: {subtitle_align};
+        font-size: {int(max(8, min(48, subtitle_size)))}px;
+        font-family: '{_safe_font(subtitle_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }}
     .form-card {{
         background: {card_bg};
@@ -267,10 +362,8 @@ def _render_modern_form_html(
         background: #000;
     }}
     .note {{
-        text-align: center;
-        margin-top: 16px;
-        font-size: 14px;
-        opacity: 0.8;
+        margin-top: 0;
+        opacity: 0.85;
     }}
     """
 
@@ -296,13 +389,15 @@ def _render_modern_form_html(
         <meta charset='utf-8'/>
         <meta name='viewport' content='width=device-width,initial-scale=1'/>
         <title>{title_text}</title>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+        {font_links}
         <style>{css}</style>
       </head>
       <body>
         <div class="container">
-          <h1>{title_text}</h1>
-          <div class='note'>{subtitle_text}</div>
+          <div class="title-card">
+            <h1>{title_text}</h1>
+            <div class='note subtitle'>{subtitle_text}</div>
+          </div>
           <div class="form-card">
             <form method='POST' action='/api/booking/submit' onsubmit='return onSubmit(event)'>
               <input type='hidden' name='form_id' value='{form_id}'/>
@@ -378,6 +473,22 @@ async def preview_booking(request: Request):
     except Exception:
         input_radius = 10
 
+    # Appearance (title/subtitle)
+    _ta = _pick("title_align", default="center").lower()
+    title_align = _ta if _ta in ("left","center","right") else "center"
+    _sa = _pick("subtitle_align", default="center").lower()
+    subtitle_align = _sa if _sa in ("left","center","right") else "center"
+    try:
+        title_size = int(_pick("title_size", default="28"))
+    except Exception:
+        title_size = 28
+    try:
+        subtitle_size = int(_pick("subtitle_size", default="14"))
+    except Exception:
+        subtitle_size = 14
+    title_font = _pick("title_font", default="Inter")
+    subtitle_font = _pick("subtitle_font", default="Inter")
+
     html = _render_modern_form_html(
         form_id="preview",
         default_date=date,
@@ -391,6 +502,12 @@ async def preview_booking(request: Request):
         allow_in_studio=allow_in_studio,
         hide_payment_option=hide_payment_option,
         input_radius=input_radius,
+        title_align=title_align,
+        subtitle_align=subtitle_align,
+        title_size=title_size,
+        subtitle_size=subtitle_size,
+        title_font=title_font,
+        subtitle_font=subtitle_font,
     )
     return HTMLResponse(html)
 
