@@ -67,6 +67,8 @@ async def get_form(request: Request):
             "button_text": form.get("button_text") or "#001014",
             "hide_payment_option": bool(form.get("hide_payment_option") or False),
             "allow_in_studio": bool(form.get("allow_in_studio") or False),
+            "title": form.get("title") or "Book a Photoshoot",
+            "subtitle": form.get("subtitle") or "Fill this form here",
             "updated_at": int(time.time()),
         }
         write_json_key(_user_form_key(eff_uid), form)
@@ -96,6 +98,8 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     button_text = payload.get("button_text") or form.get("button_text") or "#000000"
     hide_payment_option = bool(payload.get("hide_payment_option") if payload.get("hide_payment_option") is not None else form.get("hide_payment_option") or False)
     allow_in_studio = bool(payload.get("allow_in_studio") if payload.get("allow_in_studio") is not None else form.get("allow_in_studio") or False)
+    title = payload.get("title") or form.get("title") or "Book a Photoshoot"
+    subtitle = payload.get("subtitle") or form.get("subtitle") or "Fill this form here"
     # template removed
 
     form.update({
@@ -106,6 +110,8 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "button_text": str(button_text),
         "hide_payment_option": bool(hide_payment_option),
         "allow_in_studio": bool(allow_in_studio),
+        "title": str(title),
+        "subtitle": str(subtitle),
         "updated_at": int(time.time()),
     })
     write_json_key(_user_form_key(eff_uid), form)
@@ -146,9 +152,21 @@ async def public_booking_form(form_id: str, request: Request):
     full_form = _qp_bool("full_form")
     no_cta = _qp_bool("no_cta")
 
+    # Resolve title/subtitle (query overrides saved form)
+    try:
+        title_text = str(request.query_params.get("title") or form.get("title") or "Book a Photoshoot")
+    except Exception:
+        title_text = "Book a Photoshoot"
+    try:
+        subtitle_text = str(request.query_params.get("subtitle") or form.get("subtitle") or "Fill this form here")
+    except Exception:
+        subtitle_text = "Fill this form here"
+
     html = _render_modern_form_html(
         form_id=form_id,
         default_date=default_date,
+        title_text=title_text,
+        subtitle_text=subtitle_text,
         accent=label_color,
         bg=bg,
         card_bg=form_card_bg,
@@ -164,6 +182,8 @@ def _render_modern_form_html(
     form_id: str,
     default_date: str = "",
     *,
+    title_text: str = "Book a Photoshoot",
+    subtitle_text: str = "Fill this form here",
     accent: str = "#111827",       # dark gray text
     bg: str = "#ffffff",           # light/white background
     card_bg: str = "#f9fafb",      # light gray card
@@ -264,13 +284,15 @@ def _render_modern_form_html(
       <head>
         <meta charset='utf-8'/>
         <meta name='viewport' content='width=device-width,initial-scale=1'/>
-        <title>Book a Session</title>
+        <title>{title_text}</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
         <style>{css}</style>
       </head>
       <body>
         <div class="container">
-                    <div class="form-card">
+          <h1>{title_text}</h1>
+          <div class='note'>{subtitle_text}</div>
+          <div class="form-card">
             <form method='POST' action='/api/booking/submit' onsubmit='return onSubmit(event)'>
               <input type='hidden' name='form_id' value='{form_id}'/>
               <div class='field'>
@@ -338,9 +360,14 @@ async def preview_booking(request: Request):
     full_form = _bool("full_form")
     no_cta = _bool("no_cta")
 
+    title_text = _pick("title", default="Book a Photoshoot")
+    subtitle_text = _pick("subtitle", default="Fill this form here")
+
     html = _render_modern_form_html(
         form_id="preview",
         default_date=date,
+        title_text=title_text,
+        subtitle_text=subtitle_text,
         accent=label_color,
         bg=bg,
         card_bg=form_card_bg,
