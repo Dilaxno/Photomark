@@ -7,8 +7,11 @@ import zipfile
 import httpx
 import asyncio
 import qrcode
+import subprocess
+import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Body, UploadFile, File, Form
+from fastapi import APIRouter, Request, Body, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -1108,6 +1111,211 @@ async def vaults_share_link(request: Request, payload: dict = Body(...)):
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
     link = f"{front}/#share?token={token}"
     return {"ok": True, "link": link, "token": token, "expires_at": expires_at_iso}
+
+
+@router.post("/vaults/reel")
+async def vaults_create_reel(request: Request, payload: dict = Body(...), background_tasks: BackgroundTasks = None):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    vault = str((payload or {}).get('vault') or '').strip()
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    try:
+        # Validate vault exists
+        _ = _read_vault(uid, vault)
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    # Options
+    audio_url = str((payload or {}).get('audio_url') or '').strip()
+    bpm = None
+    try:
+        if (payload or {}).get('bpm') is not None:
+            bpm = float(payload.get('bpm'))
+            if not (0 < bpm < 400):
+                bpm = None
+    except Exception:
+        bpm = None
+    beat_marks = []
+    try:
+        raw = payload.get('beat_marks') or []
+        if isinstance(raw, list):
+            beat_marks = [float(x) for x in raw if x is not None]
+    except Exception:
+        beat_marks = []
+    transition = str((payload or {}).get('transition') or 'crossfade').strip().lower()
+    if transition not in ("crossfade", "slide", "zoom"):
+        transition = "crossfade"
+    fps = int((payload or {}).get('fps') or 30)
+    width = int((payload or {}).get('width') or 1080)
+    height = int((payload or {}).get('height') or 1920)
+    limit = int((payload or {}).get('limit') or 120)
+
+    # Build image URLs (watermarked)
+    try:
+        keys = _read_vault(uid, vault)
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    img_urls: list[str] = []
+    try:
+        if s3 and R2_BUCKET:
+            if R2_PUBLIC_BASE_URL:
+                for k in keys:
+                    if k.lower().endswith('.json'):
+                        continue
+                    img_urls.append(f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{k}")
+            else:
+                # Signed URLs may expire; acceptable for immediate render
+                for k in keys:
+                    if k.lower().endswith('.json'):
+                        continue
+                    try:
+                        url = s3.meta.client.generate_presigned_url(
+                            "get_object", Params={"Bucket": R2_BUCKET, "Key": k}, ExpiresIn=60 * 60
+                        )
+                        img_urls.append(url)
+                    except Exception:
+                        continue
+        else:
+            for k in keys:
+                if k.lower().endswith('.json'):
+                    continue
+                img_urls.append(f"/static/{k}")
+    except Exception:
+        img_urls = []
+
+    if not img_urls:
+        return JSONResponse({"error": "no photos in vault"}, status_code=400)
+
+    # Order and limit for sensible default reel length
+    try:
+        img_urls = img_urls[: max(1, min(limit, len(img_urls)))]
+    except Exception:
+        img_urls = img_urls[:120]
+
+    # Create job descriptor
+    job_id = secrets.token_urlsafe(8)
+    created_at = datetime.utcnow().isoformat()
+    params = {
+        "audio_url": audio_url,
+        "bpm": bpm,
+        "beat_marks": beat_marks,
+        "transition": transition,
+        "fps": fps,
+        "width": width,
+        "height": height,
+    }
+    job = {
+        "id": job_id,
+        "uid": uid,
+        "vault": vault,
+        "created_at": created_at,
+        "status": "queued",
+        "params": params,
+        "images": img_urls,
+    }
+
+    # Persist status for polling
+    status_key = f"users/{uid}/reels/jobs/{job_id}.status.json"
+    try:
+        _write_json_key(status_key, job)
+    except Exception:
+        pass
+
+    # Background render task
+    def _bg_render():
+        try:
+            # Write job JSON to a temp file for the Node renderer
+            tmpdir = Path(tempfile.gettempdir()) / "photomark-reels"
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            job_path = tmpdir / f"{job_id}.json"
+            with open(job_path, 'w', encoding='utf-8') as f:
+                import json as _json
+                _json.dump(job, f)
+
+            out_path = tmpdir / f"{job_id}.mp4"
+
+            # Resolve render script path
+            script = os.getenv("REMOTION_RENDER_SCRIPT", str(Path(__file__).resolve().parents[2] / 'reels' / 'render.mjs'))
+            # Execute Node renderer
+            try:
+                subprocess.run(["node", script, "--job", str(job_path), "--out", str(out_path)], check=True)
+            except Exception as ex:
+                # Update status to failed
+                try:
+                    fail = job.copy()
+                    fail.update({"status": "failed", "error": str(ex)})
+                    _write_json_key(status_key, fail)
+                except Exception:
+                    pass
+                return
+
+            # Read file and upload to storage
+            try:
+                data = out_path.read_bytes()
+            except Exception as ex:
+                try:
+                    fail = job.copy()
+                    fail.update({"status": "failed", "error": f"output missing: {ex}"})
+                    _write_json_key(status_key, fail)
+                except Exception:
+                    pass
+                return
+
+            # Persist video
+            try:
+                vid_key = f"users/{uid}/reels/{job_id}.mp4"
+                url = upload_bytes(vid_key, data, content_type="video/mp4")
+                if not url:
+                    if s3 and R2_BUCKET and R2_PUBLIC_BASE_URL:
+                        url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{vid_key}"
+                    else:
+                        url = f"/static/{vid_key}"
+                done = job.copy()
+                done.update({"status": "done", "video_key": vid_key, "url": url, "completed_at": datetime.utcnow().isoformat()})
+                _write_json_key(status_key, done)
+            except Exception as ex:
+                try:
+                    fail = job.copy()
+                    fail.update({"status": "failed", "error": str(ex)})
+                    _write_json_key(status_key, fail)
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                fail = job.copy()
+                fail.update({"status": "failed", "error": "unexpected renderer error"})
+                _write_json_key(status_key, fail)
+            except Exception:
+                pass
+
+    try:
+        if background_tasks is not None:
+            background_tasks.add_task(_bg_render)
+        else:
+            # Fallback synchronous (slower API request), not recommended
+            _bg_render()
+    except Exception:
+        pass
+
+    return {"ok": True, "id": job_id}
+
+
+@router.get("/vaults/reel/status")
+async def vaults_reel_status(request: Request, id: str):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    jid = str((id or '').strip())
+    if not jid:
+        return JSONResponse({"error": "id required"}, status_code=400)
+    key = f"users/{uid}/reels/jobs/{jid}.status.json"
+    rec = _read_json_key(key) or {}
+    if not rec:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return rec
 
 
 @router.post("/vaults/share/logo")
