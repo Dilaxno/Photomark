@@ -15,7 +15,7 @@ warnings.filterwarnings(
 )
 
 # Routers
-from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading, admin
+from app.routers import images, photos, auth, convert, vaults, voice, collab, gallery_assistant, color_grading, admin, mark
 
 # Pricing checkout (server-side) removed in favor of client-side overlay
 
@@ -63,6 +63,7 @@ app.include_router(collab.router)
 app.include_router(gallery_assistant.router)
 # Color grading (LUT)
 app.include_router(color_grading.router)
+app.include_router(mark.router)
 
 # app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
