@@ -78,6 +78,9 @@ async def get_form(request: Request):
             "title_font": form.get("title_font") or "Inter",
             "subtitle_font": form.get("subtitle_font") or "Inter",
             "input_radius": int(form.get("input_radius") or 10),
+            "submit_label": form.get("submit_label") or "Request Booking",
+            "title_font_data": form.get("title_font_data") or "",
+            "subtitle_font_data": form.get("subtitle_font_data") or "",
             "studio_address": form.get("studio_address") or "",
             "studio_lat": form.get("studio_lat") or "",
             "studio_lng": form.get("studio_lng") or "",
@@ -128,6 +131,10 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         subtitle_size = 14
     title_font = str(payload.get("title_font") or form.get("title_font") or "Inter")
     subtitle_font = str(payload.get("subtitle_font") or form.get("subtitle_font") or "Inter")
+    # Submit label + custom fonts
+    submit_label = str(payload.get("submit_label") or form.get("submit_label") or "Request Booking")
+    title_font_data = str(payload.get("title_font_data") or form.get("title_font_data") or "")
+    subtitle_font_data = str(payload.get("subtitle_font_data") or form.get("subtitle_font_data") or "")
     # Studio + Maps settings
     studio_address = str(payload.get("studio_address") or form.get("studio_address") or "")
     studio_lat = str(payload.get("studio_lat") or form.get("studio_lat") or "")
@@ -152,6 +159,9 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "title_font": str(title_font),
         "subtitle_font": str(subtitle_font),
         "input_radius": int(max(0, min(32, input_radius))),
+        "submit_label": submit_label,
+        "title_font_data": title_font_data,
+        "subtitle_font_data": subtitle_font_data,
         "studio_address": studio_address,
         "studio_lat": studio_lat,
         "studio_lng": studio_lng,
@@ -238,6 +248,11 @@ async def public_booking_form(form_id: str, request: Request):
     except Exception:
         subtitle_font = "Inter"
 
+    try:
+        submit_label = str(request.query_params.get("submit_label") or form.get("submit_label") or "Request Booking")
+    except Exception:
+        submit_label = "Request Booking"
+
     # Studio/maps from saved form or query overrides
     maps_api_key = str(request.query_params.get("maps_api_key") or form.get("maps_api_key") or "")
     studio_address = str(request.query_params.get("studio_address") or form.get("studio_address") or "")
@@ -263,6 +278,9 @@ async def public_booking_form(form_id: str, request: Request):
         subtitle_size=subtitle_size,
         title_font=title_font,
         subtitle_font=subtitle_font,
+        submit_label=submit_label,
+        title_font_data=str(form.get("title_font_data") or ""),
+        subtitle_font_data=str(form.get("subtitle_font_data") or ""),
     )
     return HTMLResponse(html)
 
@@ -287,6 +305,9 @@ def _render_modern_form_html(
     subtitle_size: int = 14,
     title_font: str = "Inter",
     subtitle_font: str = "Inter",
+    submit_label: str = "Request Booking",
+    title_font_data: str = "",
+    subtitle_font_data: str = "",
     studio_address: str = "",
     studio_lat: str = "",
     studio_lng: str = "",
@@ -299,9 +320,9 @@ def _render_modern_form_html(
         except Exception:
             return "Inter"
     families = []
-    for fam in {repr(title_font)}, {repr(subtitle_font)}, {repr('Inter')}:
+    for fam in (str(title_font), str(subtitle_font), 'Inter'):
         sf = _safe_font(fam)
-        if sf not in families:
+        if sf and sf not in families:
             families.append(sf)
     font_links = "\n        ".join([
         f'<link href="https://fonts.googleapis.com/css2?family={fn.replace(" ", "+")}:wght@400;600&display=swap" rel="stylesheet"/>'
@@ -309,6 +330,29 @@ def _render_modern_form_html(
     ])
 
     maps_script = f"<script src=\"https://maps.googleapis.com/maps/api/js?key={maps_api_key}&libraries=places\"></script>" if maps_api_key else ""
+
+    # Custom @font-face from uploaded Data URLs
+    custom_fonts_css = ""
+    if title_font_data:
+        custom_fonts_css += f"""
+        @font-face {{
+            font-family: 'CustomTitleFont';
+            src: url({title_font_data});
+            font-weight: 400 700;
+            font-style: normal;
+            font-display: swap;
+        }}
+        """
+    if subtitle_font_data:
+        custom_fonts_css += f"""
+        @font-face {{
+            font-family: 'CustomSubtitleFont';
+            src: url({subtitle_font_data});
+            font-weight: 400 700;
+            font-style: normal;
+            font-display: swap;
+        }}
+        """
 
     css = f"""
     * {{ box-sizing: border-box; }}
@@ -336,12 +380,12 @@ def _render_modern_form_html(
         font-weight: 600;
         margin: 0 0 8px 0;
         text-align: {title_align};
-        font-family: '{_safe_font(title_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        font-family: {"'CustomTitleFont', " if title_font_data else ''}'{_safe_font(title_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }}
     .subtitle {{
         text-align: {subtitle_align};
         font-size: {int(max(8, min(48, subtitle_size)))}px;
-        font-family: '{_safe_font(subtitle_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        font-family: {"'CustomSubtitleFont', " if subtitle_font_data else ''}'{_safe_font(subtitle_font)}', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }}
     .form-card {{
         background: {card_bg};
@@ -429,7 +473,7 @@ def _render_modern_form_html(
         <title>{title_text}</title>
         {font_links}
         {maps_script}
-        <style>{css}</style>
+        <style>{custom_fonts_css}{css}</style>
       </head>
       <body>
         <div class="container">
@@ -474,7 +518,7 @@ def _render_modern_form_html(
                 <input type='hidden' name='latitude' id='latField'/>
                 <input type='hidden' name='longitude' id='lngField'/>
               </div>
-              <button type='submit'>Request Booking</button>
+              <button type='submit'>{submit_label}</button>
               <div id='msg' class='note'></div>
             </form>
           </div>
@@ -636,6 +680,7 @@ async def preview_booking(request: Request):
         input_radius = int(_pick("input_radius", default="10"))
     except Exception:
         input_radius = 10
+    submit_label = _pick("submit_label", default="Request Booking")
 
     maps_api_key = _pick("maps_api_key", default="")
     studio_address = _pick("studio_address", default="")
@@ -677,6 +722,7 @@ async def preview_booking(request: Request):
         subtitle_size=subtitle_size,
         title_font=title_font,
         subtitle_font=subtitle_font,
+        submit_label=submit_label,
         studio_address=studio_address,
         studio_lat=studio_lat,
         studio_lng=studio_lng,
