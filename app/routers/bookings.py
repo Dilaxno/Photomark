@@ -69,6 +69,7 @@ async def get_form(request: Request):
             "allow_in_studio": bool(form.get("allow_in_studio") or False),
             "title": form.get("title") or "Book a Photoshoot",
             "subtitle": form.get("subtitle") or "Fill this form here",
+            "input_radius": int(form.get("input_radius") or 10),
             "updated_at": int(time.time()),
         }
         write_json_key(_user_form_key(eff_uid), form)
@@ -100,6 +101,7 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     allow_in_studio = bool(payload.get("allow_in_studio") if payload.get("allow_in_studio") is not None else form.get("allow_in_studio") or False)
     title = payload.get("title") or form.get("title") or "Book a Photoshoot"
     subtitle = payload.get("subtitle") or form.get("subtitle") or "Fill this form here"
+    input_radius = int(payload.get("input_radius") if payload.get("input_radius") is not None else form.get("input_radius") or 10)
     # template removed
 
     form.update({
@@ -112,6 +114,7 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         "allow_in_studio": bool(allow_in_studio),
         "title": str(title),
         "subtitle": str(subtitle),
+        "input_radius": int(max(0, min(32, input_radius))),
         "updated_at": int(time.time()),
     })
     write_json_key(_user_form_key(eff_uid), form)
@@ -141,6 +144,10 @@ async def public_booking_form(form_id: str, request: Request):
         default_date = str(request.query_params.get("date") or "").strip()
     except Exception:
         default_date = ""
+    try:
+        input_radius = int(request.query_params.get("input_radius") or form.get("input_radius") or 10)
+    except Exception:
+        input_radius = 10
     # Flags
     def _qp_bool(key: str) -> bool:
         try:
@@ -174,6 +181,7 @@ async def public_booking_form(form_id: str, request: Request):
         accent_button_text=button_text,
         allow_in_studio=allow_in_studio,
         hide_payment_option=hide_payment_option,
+        input_radius=input_radius,
     )
     return HTMLResponse(html)
 
@@ -191,6 +199,7 @@ def _render_modern_form_html(
     accent_button_text: str = "#ffffff",
     allow_in_studio: bool = False,
     hide_payment_option: bool = False,
+    input_radius: int = 10,
 ) -> str:
     css = f"""
     * {{ box-sizing: border-box; }}
@@ -231,7 +240,7 @@ def _render_modern_form_html(
         width: 100%;
         padding: 12px 14px;
         border: 1px solid #d1d5db;
-        border-radius: 10px;
+        border-radius: {int(max(0, min(32, input_radius)))}px;
         background: #fff;
         font-size: 15px;
         transition: border 0.2s;
@@ -362,6 +371,10 @@ async def preview_booking(request: Request):
 
     title_text = _pick("title", default="Book a Photoshoot")
     subtitle_text = _pick("subtitle", default="Fill this form here")
+    try:
+        input_radius = int(_pick("input_radius", default="10"))
+    except Exception:
+        input_radius = 10
 
     html = _render_modern_form_html(
         form_id="preview",
@@ -375,6 +388,7 @@ async def preview_booking(request: Request):
         accent_button_text=button_text,
         allow_in_studio=allow_in_studio,
         hide_payment_option=hide_payment_option,
+        input_radius=input_radius,
     )
     return HTMLResponse(html)
 
