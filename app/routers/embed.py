@@ -185,7 +185,7 @@ def embed_myuploads(
     if keys and keys.strip():
         desired = [k.strip() for k in keys.split(',') if k.strip()]
         lookup = {p.get("key"): p for p in photos_all}
-    photos = [lookup[k] for k in desired if k in lookup]
+        photos = [lookup[k] for k in desired if k in lookup]  # ✅ correctly indented
     else:
         if limit.lower() == "all":
             photos = photos_all
