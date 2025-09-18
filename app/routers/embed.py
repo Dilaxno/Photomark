@@ -124,7 +124,7 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 @router.get("/gallery")
 def embed_gallery(
     uid: str = Query(..., min_length=3, max_length=64),
-    limit: str = Query("10"),
+    limit: str = Query("all"),
     theme: str = Query("dark"),
     bg: str | None = Query(None, min_length=1, max_length=32),
     keys: str | None = Query(None, min_length=1),
@@ -143,13 +143,13 @@ def embed_gallery(
                 n = int(limit)
             except:
                 n = 10
-            photos = photos_all[:max(1, min(n, 200))]
+            photos = photos_all[:max(1, n)]
     return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark Gallery"))
 
 @router.get("/myuploads")
 def embed_myuploads(
     uid: str = Query(..., min_length=3, max_length=64),
-    limit: str = Query("10"),
+    limit: str = Query("all"),
     theme: str = Query("dark"),
     bg: str | None = Query(None, min_length=1, max_length=32),
     keys: str | None = Query(None, min_length=1),
@@ -159,16 +159,25 @@ def embed_myuploads(
     if s3 and R2_BUCKET:
         try:
             client = s3.meta.client
-            resp = client.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix, MaxKeys=1000)
-            for entry in resp.get("Contents", []) or []:
-                key = entry.get("Key", "")
-                if not key or key.endswith("/"): continue
-                name = os.path.basename(key)
-                url = (
-                    f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else
-                    client.generate_presigned_url("get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=3600)
-                )
-                items.append({"key": key, "url": url, "name": name, "last": (entry.get("LastModified") or datetime.utcnow()).isoformat()})
+            continuation = None
+            while True:
+                params = {"Bucket": R2_BUCKET, "Prefix": prefix, "MaxKeys": 1000}
+                if continuation:
+                    params["ContinuationToken"] = continuation
+                resp = client.list_objects_v2(**params)
+                for entry in resp.get("Contents", []) or []:
+                    key = entry.get("Key", "")
+                    if not key or key.endswith("/"): continue
+                    name = os.path.basename(key)
+                    url = (
+                        f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}" if R2_PUBLIC_BASE_URL else
+                        client.generate_presigned_url("get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=3600)
+                    )
+                    items.append({"key": key, "url": url, "name": name, "last": (entry.get("LastModified") or datetime.utcnow()).isoformat()})
+                if resp.get("IsTruncated"):
+                    continuation = resp.get("NextContinuationToken")
+                else:
+                    break
         except:
             items = []
     else:
@@ -198,5 +207,5 @@ def embed_myuploads(
                 n = int(limit)
             except:
                 n = 10
-            photos = photos_all[:max(1, min(n, 200))]
+            photos = photos_all[:max(1, n)]
     return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark My Uploads"))            
