@@ -46,7 +46,11 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     .grid {{ column-count: 2; column-gap: 0; }}
     @media (min-width: 1024px) {{ .grid {{ column-count: 4; }} }}
     .card {{ display:inline-block; width:100%; margin:0; border:none; border-radius:0; overflow:hidden; background:{card_bg}; break-inside: avoid; }}
-    .card img {{ width:100%; display:block; aspect-ratio: 1 / 1; object-fit:cover; }}
+    .card img {{width: 100%;
+    height: auto;         
+    display: block;
+    object-fit: contain;
+}}
 </style>
 </head>
 <body>
