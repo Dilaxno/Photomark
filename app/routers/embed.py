@@ -74,7 +74,7 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
         var card = document.createElement('div');
         card.className = 'card';
         var img = document.createElement('img');
-        img.loading = 'eager';
+        img.loading = 'lazy';   // ✅ now lazy loading
         img.decoding = 'async';
         img.src = p.url;
         img.alt = '';
@@ -92,7 +92,7 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
         var h = Math.max(
             document.documentElement.scrollHeight,
             document.body ? document.body.scrollHeight : 0,
-            document.documentElement.offsetHeight,
+    document.documentElement.offsetHeight,
             document.documentElement.clientHeight
         );
         parent.postMessage({{ type: "pm-embed-height", height: h }}, "*");
@@ -185,7 +185,7 @@ def embed_myuploads(
     if keys and keys.strip():
         desired = [k.strip() for k in keys.split(',') if k.strip()]
         lookup = {p.get("key"): p for p in photos_all}
-        photos = [lookup[k] for k in desired if k in lookup]
+    photos = [lookup[k] for k in desired if k in lookup]
     else:
         if limit.lower() == "all":
             photos = photos_all
@@ -195,5 +195,4 @@ def embed_myuploads(
             except:
                 n = 10
             photos = photos_all[:max(1, min(n, 200))]
-    return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark My Uploads"))
-
+    return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark My Uploads"))            
