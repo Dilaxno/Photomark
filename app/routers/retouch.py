@@ -398,6 +398,95 @@ async def apply_selective(
         logger.exception(f"Selective color apply failed: {ex}")
         return {"error": str(ex)}
 
+
+@router.post("/masked_adjust")
+async def masked_adjust(
+    request: Request,
+    file: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    adjustments: str = Form("{}"),
+):
+    """Apply basic color adjustments only where mask=white. Returns PNG.
+    adjustments JSON supports: { brightness: float, contrast: float, saturation: float, hue_shift: float }
+    - brightness and contrast are multiplicative factors (1.0 = no change)
+    - saturation factor in HSV S channel
+    - hue_shift in degrees (-180..180)
+    """
+    try:
+        raw = await file.read()
+        mask_raw = await mask.read()
+        if not raw:
+            return {"error": "empty image"}
+        if not mask_raw:
+            return {"error": "empty mask"}
+
+        billing_uid = _billing_uid_from_request(request)
+        if not _is_paid_customer(billing_uid):
+            if not _consume_one_free(billing_uid, 'retouch_masked_adjust'):
+                return {"error": "free_limit_reached", "message": "Upgrade to continue."}
+
+        try:
+            adj = json.loads(adjustments or "{}")
+            if not isinstance(adj, dict):
+                adj = {}
+        except Exception:
+            adj = {}
+        brightness = float(adj.get('brightness', 1.0))
+        contrast = float(adj.get('contrast', 1.0))
+        saturation = float(adj.get('saturation', 1.0))
+        hue_shift = float(adj.get('hue_shift', 0.0))
+
+        # Decode image and mask
+        img_arr = np.frombuffer(raw, np.uint8)
+        img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"error": "invalid image"}
+        mask_arr = np.frombuffer(mask_raw, np.uint8)
+        m = cv2.imdecode(mask_arr, cv2.IMREAD_UNCHANGED)
+        if m is None:
+            return {"error": "invalid mask"}
+        if m.ndim == 3:
+            # If RGBA provided, prefer alpha; else convert to gray
+            if m.shape[2] == 4:
+                m = m[:, :, 3]
+            else:
+                m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+        # Resize mask to image size
+        m = cv2.resize(m, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
+        # Threshold to binary 0/255
+        _, mbin = cv2.threshold(m, 127, 255, cv2.THRESH_BINARY)
+        mask_bool = (mbin > 127)
+
+        # Build adjusted version
+        adj_bgr = img.copy().astype(np.float32)
+        # Contrast/Brightness around mid-gray (128)
+        if abs(contrast - 1.0) > 1e-6 or abs(brightness - 1.0) > 1e-6:
+            # brightness multiplier on top of contrast centered at 128
+            adj_bgr = (adj_bgr - 128.0) * contrast + 128.0
+            adj_bgr = adj_bgr * brightness
+            adj_bgr = np.clip(adj_bgr, 0, 255)
+        adj_bgr = adj_bgr.astype(np.uint8)
+        # Hue/Saturation in HSV
+        if abs(hue_shift) > 1e-6 or abs(saturation - 1.0) > 1e-6:
+            hsv = cv2.cvtColor(adj_bgr, cv2.COLOR_BGR2HSV).astype(np.int16)
+            H, S, V = hsv[...,0], hsv[...,1], hsv[...,2]
+            if abs(hue_shift) > 1e-6:
+                dH = int(round(hue_shift / 2.0))  # degrees to OpenCV units
+                H[:] = (H + dH) % 180
+            if abs(saturation - 1.0) > 1e-6:
+                S[:] = np.clip((S.astype(np.float32) * saturation), 0, 255).astype(np.int16)
+            hsv_out = np.stack([H, S, V], axis=-1).astype(np.uint8)
+            adj_bgr = cv2.cvtColor(hsv_out, cv2.COLOR_HSV2BGR)
+
+        # Composite: apply adjusted where mask is true
+        out = img.copy()
+        out[mask_bool] = adj_bgr[mask_bool]
+        out_bgra = cv2.cvtColor(out, cv2.COLOR_BGR2BGRA)
+        return _encode_png(out_bgra)
+    except Exception as ex:
+        logger.exception(f"masked_adjust failed: {ex}")
+        return {"error": str(ex)}
+
 # ---------------- LIGHTROOM-LIKE PIPELINE ----------------
 
 def _apply_white_balance_bgr(img_bgr: np.ndarray, kelvin_shift: float, tint_shift: float) -> np.ndarray:
