@@ -59,6 +59,7 @@ async def get_form(request: Request):
         form_id = _new_id()
         form = {
             "form_id": form_id,
+            "form_style": form.get("form_style") or "classic",  # 'classic' or 'modern'
             "background_color": form.get("background_color") or "#0a0d0f",
             # Optional customizations with sensible defaults
             "form_card_bg": form.get("form_card_bg") or "rgba(255,255,255,.04)",
@@ -89,6 +90,9 @@ async def update_form(request: Request, payload: Dict[str, Any]):
         write_json_key(_form_registry_key(form_id), {"user_uid": eff_uid})
         form["form_id"] = form_id
 
+    # New: allow saving style param
+    form_style = payload.get("form_style") or form.get("form_style") or "classic"
+
     bg = payload.get("background_color") or form.get("background_color") or "#0b0b0c"
     form_card_bg = payload.get("form_card_bg") or form.get("form_card_bg") or "rgba(255,255,255,.06)"
     label_color = payload.get("label_color") or form.get("label_color") or "#fafafa"
@@ -99,6 +103,7 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     # template removed
 
     form.update({
+        "form_style": str(form_style),
         "background_color": str(bg),
         "form_card_bg": str(form_card_bg),
         "label_color": str(label_color),
@@ -112,56 +117,323 @@ async def update_form(request: Request, payload: Dict[str, Any]):
     return form
 
 
-# --------- Public embed page (for iframe) ---------
+# --------- Renderers ---------
+# Classic renderer (original split layout). Kept as _render_public_form_html.
+# NOTE: This is mostly identical to your original; uses Template to avoid f-string-brace issues.
 
-@router.get("/public/{form_id}")
-async def public_booking_form(form_id: str, request: Request):
-    # Resolve owner uid
-    reg = read_json_key(_form_registry_key(form_id)) or {}
-    uid = reg.get("user_uid")
-    if not uid:
-        return HTMLResponse("<h1>Form not found</h1>", status_code=404)
-    form = read_json_key(_user_form_key(uid)) or {}
-    bg = form.get("background_color") or "#0b0b0c"
-    form_card_bg = form.get("form_card_bg") or "rgba(255,255,255,.06)"
-    label_color = form.get("label_color") or "#fafafa"
-    button_bg = form.get("button_bg") or "#8ab4f8"
-    button_text = form.get("button_text") or "#000000"
-    hide_payment_option = bool(form.get("hide_payment_option") or False)
-    allow_in_studio = bool(form.get("allow_in_studio") or False)
-    # templates removed; always render split layout
-    # Default date prefill through query param ?date=YYYY-MM-DD
-    try:
-        default_date = str(request.query_params.get("date") or "").strip()
-    except Exception:
-        default_date = ""
-    # Flags
-    def _qp_bool(key: str) -> bool:
-        try:
-            v = request.query_params.get(key)
-            return bool(str(v).lower() in ("1","true","yes","on")) if v is not None else False
-        except Exception:
-            return False
+def _render_public_form_html(
+    form_id: str,
+    bg: str,
+    default_date: str = "",
+    *,
 
-    full_form = _qp_bool("full_form")
-    no_cta = _qp_bool("no_cta")
-
-    html = _render_public_form_html(
-        form_id,
-        bg,
-        default_date,
+    form_card_bg: str = "rgba(255,255,255,.04)",
+    label_color: str = "#cbd5e1",
+    button_bg: str = "#7fe0d6",
+    button_text: str = "#001014",
+    hide_payment_option: bool = False,
+    allow_in_studio: bool = False,
+    full_form: bool = False,
+    no_cta: bool = False,
+) -> str:
+    css_tpl = Template(
+        """
+    :root{--pm-accent:#8ab4f8}
+    *{box-sizing:border-box}
+    body{margin:0;background:${bg};color:#fafafa;font-family:'Outfit', -apple-system, system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial}
+    .container{max-width:720px;margin:0 auto;padding:20px}
+    h1{font-size:clamp(22px,4vw,30px);font-weight:800;letter-spacing:-.02em;margin:0 0 12px}
+    .card{border:1px solid rgba(255,255,255,.12);border-radius:16px;background:${form_card_bg};padding:16px}
+    label{display:block;font-size:12px;color:${label_color};margin:10px 0 6px}
+    input,textarea,select{width:100%;background:rgba(0,0,0,.3);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px}
+    button{display:inline-flex;align-items:center;gap:8px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0;text-decoration:none;margin-top:14px}
+    .row{display:grid;gap:10px;grid-template-columns:1fr}
+    @media(min-width:640px){.row{grid-template-columns:1fr 1fr}}
+    .note{font-size:12px;opacity:.75;margin-top:8px}
+    .ok{background:#10b981;color:#001}
+    .err{background:#ef4444;color:#fff}
+        """.strip()
+    )
+    base_css = css_tpl.substitute(
+        bg=bg,
         form_card_bg=form_card_bg,
         label_color=label_color,
         button_bg=button_bg,
         button_text=button_text,
-        hide_payment_option=hide_payment_option,
-        allow_in_studio=allow_in_studio,
-        full_form=full_form,
-        no_cta=no_cta,
     )
-    return HTMLResponse(html)
+
+    if full_form:
+        layout_css = Template(
+            """
+            .container{max-width:720px;margin:0 auto;padding:20px}
+            .form-card{border:1px solid rgba(255,255,255,.12);border-radius:20px;background:${form_card_bg};padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+            .form-title{font-size:18px;font-weight:700;margin-bottom:16px}
+            .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+            @media(max-width:640px){.grid-2{grid-template-columns:1fr}}
+            .field{margin:10px 0}
+            .field label{font-size:12px;color:${label_color};display:block;margin-bottom:6px}
+            .field input,.field textarea,.field select{width:100%;background:transparent;color:#fff;border:0;border-bottom:1px solid rgba(255,255,255,.14);border-radius:0;padding:10px 0}
+            .field textarea{resize:vertical}
+            .actions{margin-top:16px}
+            .actions button{background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0}
+            """
+        ).substitute(form_card_bg=form_card_bg, label_color=label_color, button_bg=button_bg, button_text=button_text)
+    else:
+        layout_css = Template(
+            """
+            .container{max-width:980px;display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}
+            @media(max-width:980px){.container{display:block}}
+            .hero{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+            .hero .pill{display:inline-block;border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:6px 12px;font-size:12px;opacity:.9;margin-bottom:10px}
+            .hero h1{font-size:clamp(28px,5vw,44px);font-weight:800;letter-spacing:-.02em;margin:0 0 10px}
+            .hero .sub{opacity:.85;max-width:46ch;line-height:1.5}
+            .hero .cta{display:inline-flex;margin-top:18px;background:${button_bg};color:${button_text};font-weight:700;padding:10px 16px;border-radius:12px;text-decoration:none}
+            .form-card{border:1px solid rgba(255,255,255,.12);border-radius:20px;background:${form_card_bg};padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+            .form-title{font-size:16px;font-weight:600;margin-bottom:16px}
+            .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+            @media(max-width:640px){.grid-2{grid-template-columns:1fr}}
+            .field{margin:10px 0}
+            .field label{font-size:12px;color:${label_color};display:block;margin-bottom:6px}
+            .field input,.field textarea,.field select{width:100%;background:transparent;color:#fff;border:0;border-bottom:1px solid rgba(255,255,255,.14);border-radius:0;padding:10px 0}
+            .field textarea{resize:vertical}
+            .actions{margin-top:16px}
+            .actions button{background:${button_bg};color:${button_text};font-weight:700;padding:10px 14px;border-radius:10px;border:0}
+            """
+        ).substitute(form_card_bg=form_card_bg, label_color=label_color, button_bg=button_bg, button_text=button_text)
+
+    css = base_css + "\n" + layout_css
+
+    payment_html = "" if hide_payment_option else (
+        """
+              <div>
+                <label>Payment option</label>
+                <select name='payment_option'>
+                  <option value='online'>Online</option>
+                  <option value='offline'>Offline</option>
+                </select>
+              </div>
+        """
+    )
+
+    studio_html = (
+        '<label style="display:flex;align-items:center;gap:8px;margin-top:8px">'
+        '<input type="checkbox" id="pm_studio" /> In studio'
+        '</label>'
+    ) if allow_in_studio else ''
+
+    if full_form:
+        content_tpl = Template(
+            """
+    <div class='container'>
+      <section class='form-card' id='form'>
+        <div class='form-title'>Book Your Session</div>
+        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
+          <input type='hidden' name='form_id' value='${form_id}' />
+          <input type='hidden' name='client_name' id='pm_cn' />
+          <input type='hidden' name='latitude' id='pm_lat' />
+          <input type='hidden' name='longitude' id='pm_lon' />
+          <div class='grid-2'>
+            <div class='field'>
+              <label>First Name</label>
+              <input id='pm_fn' placeholder='John' />
+            </div>
+            <div class='field'>
+              <label>Last Name</label>
+              <input id='pm_ln' placeholder='Doe' />
+            </div>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Phone</label>
+              <input name='phone' placeholder='+1 777 888 999' required />
+            </div>
+            <div class='field'>
+              <label>Email Address</label>
+              <input name='email' type='email' placeholder='you@example.com' required />
+            </div>
+          </div>
+          <div class='field'>
+            <label>Message</label>
+            <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Preferred date</label>
+              <input name='date' type='date' required value='${default_date}' />
+            </div>
+            ${payment_html}
+          </div>
+          ${studio_html}
+          <div class='actions'>
+            <button type='submit'>Submit</button>
+            <div id='msg' class='note' style='display:inline-block;margin-left:10px'></div>
+          </div>
+        </form>
+      </section>
+    </div>
+            """
+        )
+        content_html = content_tpl.substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html)
+    else:
+        hero_cta = "" if no_cta else "<a href='#form' class='cta'>Book Now</a>"
+        split_tpl = Template(
+            """
+    <div class='container'>
+      <section class='hero'>
+        <div class='pill'>Book</div>
+        <h1>Book Your Photography Session!</h1>
+        <p class='sub'>Have a special moment to capture? We'd love to hear from you. Reach out anytime and let's create something beautiful together.</p>
+        ${hero_cta}
+      </section>
+      <section class='form-card' id='form'>
+        <div class='form-title'>Book Your Session</div>
+        <form method='POST' action='/api/booking/submit' enctype='application/x-www-form-urlencoded' onsubmit='return onSubmit(event)'>
+          <input type='hidden' name='form_id' value='${form_id}' />
+          <input type='hidden' name='client_name' id='pm_cn' />
+          <input type='hidden' name='latitude' id='pm_lat' />
+          <input type='hidden' name='longitude' id='pm_lon' />
+          <div class='grid-2'>
+            <div class='field'>
+              <label>First Name</label>
+              <input id='pm_fn' placeholder='John' />
+            </div>
+            <div class='field'>
+              <label>Last Name</label>
+              <input id='pm_ln' placeholder='Doe' />
+            </div>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Phone</label>
+              <input name='phone' placeholder='+1 777 888 999' required />
+            </div>
+            <div class='field'>
+              <label>Email Address</label>
+              <input name='email' type='email' placeholder='you@example.com' required />
+            </div>
+          </div>
+          <div class='field'>
+            <label>Message</label>
+            <textarea name='service_details' rows='4' placeholder='What service are you looking for?'></textarea>
+          </div>
+          <div class='grid-2'>
+            <div class='field'>
+              <label>Preferred date</label>
+              <input name='date' type='date' required value='${default_date}' />
+            </div>
+            ${payment_html}
+          </div>
+          ${studio_html}
+          <div class='actions'>
+            <button type='submit'>Submit</button>
+            <div id='msg' class='note' style='display:inline-block;margin-left:10px'></div>
+          </div>
+        </form>
+      </section>
+    </div>
+            """
+        )
+        content_html = split_tpl.substitute(form_id=form_id, default_date=default_date, payment_html=payment_html, studio_html=studio_html, hero_cta=hero_cta)
+
+    html_tpl = Template(
+        """<!doctype html>
+<html>
+  <head>
+    <meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>Booking</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+    <style>${css}</style>
+  </head>
+  <body>
+    ${content}
+    <script>
+      // Geolocation: best-effort, fills hidden lat/lon and a simple location string
+      (function(){
+        try {
+          if (!navigator.geolocation) return;
+          navigator.geolocation.getCurrentPosition(function(pos){
+            try {
+              var lat = (pos && pos.coords && pos.coords.latitude) ? pos.coords.latitude.toFixed(6) : '';
+              var lon = (pos && pos.coords && pos.coords.longitude) ? pos.coords.longitude.toFixed(6) : '';
+              var latEl = document.getElementById('pm_lat');
+              var lonEl = document.getElementById('pm_lon');
+              var locEl = document.getElementById('pm_location');
+              if (latEl) latEl.value = lat;
+              if (lonEl) lonEl.value = lon;
+              if (locEl && (!locEl.value || locEl.value.trim()==='')) locEl.value = (lat && lon) ? (lat + ',' + lon) : '';
+            } catch(e) {}
+          });
+        } catch(e) {}
+      })();
+      (function(){
+        try {
+          var studio = document.getElementById('pm_studio');
+          var locEl = document.getElementById('pm_location');
+          var latEl = document.getElementById('pm_lat');
+          var lonEl = document.getElementById('pm_lon');
+          if (!studio) return;
+          var apply = function(){
+            if (!studio || !locEl) return;
+            if (studio.checked){
+              if (locEl) locEl.value = 'In studio';
+              if (latEl) latEl.value = '';
+              if (lonEl) lonEl.value = '';
+              if (locEl) locEl.setAttribute('readonly', 'readonly');
+            } else {
+              if (locEl && locEl.value === 'In studio') locEl.value = '';
+              if (locEl) locEl.removeAttribute('readonly');
+            }
+          };
+          studio.addEventListener('change', apply);
+          apply();
+        } catch(e) {}
+      })();
+      async function onSubmit(e){
+        e.preventDefault();
+        const form = e.target;
+        const msg = document.getElementById('msg');
+        msg.textContent = 'Submitting...';
+        msg.className = 'note';
+        try{
+          // Compose client_name if split fields are present
+          try{
+            const fn = document.getElementById('pm_fn');
+            const ln = document.getElementById('pm_ln');
+            const cn = document.getElementById('pm_cn');
+            if (cn) {
+              const v = [fn && fn.value || '', ln && ln.value || ''].filter(Boolean).join(' ').trim();
+              if (v) cn.value = v;
+            }
+          } catch(_e){}
+          const fd = new FormData(form);
+          const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
+          const data = await res.json().catch(()=>({}));
+          if(!res.ok || data.error) throw new Error(data.error || 'Error');
+          msg.textContent = 'Thanks! We have received your request.';
+          msg.className = 'note ok';
+          form.reset();
+        }catch(err){
+          msg.textContent = err.message || 'Could not submit';
+          msg.className = 'note err';
+        }
+        return false;
+      }
+    </script>
+  </body>
+</html>"""
+    )
+
+    html = html_tpl.substitute(
+        css=css,
+        content=content_html,
+    )
+    return html
 
 
+# Modern renderer (clean, Squarespace-like). Kept as _render_modern_form_html.
 def _render_modern_form_html(
     form_id: str,
     default_date: str = "",
@@ -303,11 +575,139 @@ def _render_modern_form_html(
             </form>
           </div>
         </div>
+        <script>
+          // Small onSubmit same as classic to post and show message
+          async function onSubmit(e){
+            e.preventDefault();
+            const form = e.target;
+            const msg = document.getElementById('msg');
+            msg.textContent = 'Submitting...';
+            msg.className = 'note';
+            try{
+              const fd = new FormData(form);
+              const res = await fetch(form.action, { method: 'POST', body: fd, credentials: 'include' });
+              const data = await res.json().catch(()=>({}));
+              if(!res.ok || data.error) throw new Error(data.error || 'Error');
+              msg.textContent = 'Thanks! We have received your request.';
+              msg.className = 'note';
+              form.reset();
+            }catch(err){
+              msg.textContent = err.message || 'Could not submit';
+              msg.className = 'note';
+            }
+            return false;
+          }
+        </script>
       </body>
     </html>
     """
     return html
 
+
+def render_booking_form(
+    form_id: str,
+    *,
+    style: str = "classic",
+    default_date: str = "",
+    bg: str = "#0b0b0c",
+    form_card_bg: str = "rgba(255,255,255,.06)",
+    label_color: str = "#fafafa",
+    button_bg: str = "#8ab4f8",
+    button_text: str = "#000000",
+    hide_payment_option: bool = False,
+    allow_in_studio: bool = False,
+    full_form: bool = False,
+    no_cta: bool = False,
+) -> str:
+    """
+    Wrapper - choose renderer based on `style`.
+    style: 'classic' | 'modern'
+    """
+    try:
+        s = (str(style or "").strip().lower() or "classic")
+    except Exception:
+        s = "classic"
+
+    if s == "modern":
+        return _render_modern_form_html(
+            form_id=form_id,
+            default_date=default_date,
+            accent=label_color,
+            bg=bg,
+            card_bg=form_card_bg,
+            accent_button=button_bg,
+            accent_button_text=button_text,
+            allow_in_studio=allow_in_studio,
+            hide_payment_option=hide_payment_option,
+        )
+    # fallback to classic
+    return _render_public_form_html(
+        form_id,
+        bg,
+        default_date=default_date,
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+        hide_payment_option=hide_payment_option,
+        allow_in_studio=allow_in_studio,
+        full_form=full_form,
+        no_cta=no_cta,
+    )
+
+
+# --------- Public embed page (for iframe) ---------
+
+@router.get("/public/{form_id}")
+async def public_booking_form(form_id: str, request: Request):
+    # Resolve owner uid
+    reg = read_json_key(_form_registry_key(form_id)) or {}
+    uid = reg.get("user_uid")
+    if not uid:
+        return HTMLResponse("<h1>Form not found</h1>", status_code=404)
+    form = read_json_key(_user_form_key(uid)) or {}
+    # Respect stored form_style unless overridden by ?style=...
+    stored_style = str(form.get("form_style") or "classic")
+    style = str(request.query_params.get("style") or stored_style)
+
+    bg = form.get("background_color") or "#0b0b0c"
+    form_card_bg = form.get("form_card_bg") or "rgba(255,255,255,.06)"
+    label_color = form.get("label_color") or "#fafafa"
+    button_bg = form.get("button_bg") or "#8ab4f8"
+    button_text = form.get("button_text") or "#000000"
+    hide_payment_option = bool(form.get("hide_payment_option") or False)
+    allow_in_studio = bool(form.get("allow_in_studio") or False)
+    # default date prefill through query param ?date=YYYY-MM-DD
+    try:
+        default_date = str(request.query_params.get("date") or "").strip()
+    except Exception:
+        default_date = ""
+    # Flags
+    def _qp_bool(key: str) -> bool:
+        try:
+            v = request.query_params.get(key)
+            return bool(str(v).lower() in ("1","true","yes","on")) if v is not None else False
+        except Exception:
+            return False
+
+    full_form = _qp_bool("full_form")
+    no_cta = _qp_bool("no_cta")
+
+    html = render_booking_form(
+        form_id=form_id,
+        style=style,
+        default_date=default_date,
+        bg=bg,
+        form_card_bg=form_card_bg,
+        label_color=label_color,
+        button_bg=button_bg,
+        button_text=button_text,
+        hide_payment_option=hide_payment_option,
+        allow_in_studio=allow_in_studio,
+        full_form=full_form,
+        no_cta=no_cta,
+    )
+    return HTMLResponse(html)
 
 
 @router.get("/preview")
@@ -341,10 +741,14 @@ async def preview_booking(request: Request):
     full_form = _bool("full_form")
     no_cta = _bool("no_cta")
 
-    html = _render_public_form_html(
+    # style may be provided in preview ?style=modern
+    style = _pick("style", default="classic")
+
+    html = render_booking_form(
         form_id="preview",
-        bg=bg,
+        style=style,
         default_date=date,
+        bg=bg,
         form_card_bg=form_card_bg,
         label_color=label_color,
         button_bg=button_bg,
