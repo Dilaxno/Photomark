@@ -744,6 +744,8 @@ async def preview_booking(request: Request):
     title_font = _pick("title_font", default="Inter")
     subtitle_font = _pick("subtitle_font", default="Inter")
     label_font = _pick("label_font", default="Inter")
+    title_font_data = _pick("title_font_data", default="")
+    subtitle_font_data = _pick("subtitle_font_data", default="")
 
     html = _render_modern_form_html(
         form_id="preview",
@@ -767,6 +769,8 @@ async def preview_booking(request: Request):
         subtitle_font=subtitle_font,
         label_font=label_font,
         submit_label=submit_label,
+        title_font_data=title_font_data,
+        subtitle_font_data=subtitle_font_data,
         studio_address=studio_address,
         studio_lat=studio_lat,
         studio_lng=studio_lng,
