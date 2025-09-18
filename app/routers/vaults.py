@@ -6,6 +6,7 @@ import io
 import zipfile
 import httpx
 import asyncio
+import qrcode
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Body, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -870,6 +871,21 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
     link = f"{front}/#share?token={token}"
 
+    include_qr = bool((payload or {}).get('include_qr'))
+    qr_bytes = None
+    if include_qr:
+        try:
+            from io import BytesIO
+            qr = qrcode.QRCode(version=1, box_size=8, border=2)
+            qr.add_data(link)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            qr_bytes = buf.getvalue()
+        except Exception:
+            qr_bytes = None
+
     # Compute photo count and pluralize noun
     count = len(keys)
     noun = "photo" if count == 1 else "photos"
@@ -917,10 +933,13 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         f"This link will expire on: <strong>{expire_pretty}</strong>."
     )
 
+    extra = ""
+    if qr_bytes:
+        extra = "<br><br><div><img src=\"cid:share_qr\" alt=\"QR code to open vault\" style=\"max-width:220px;height:auto;border-radius:12px;border:1px solid #333;\" /></div>"
     html = render_email(
         "email_basic.html",
         title="Photos shared for your review",
-        intro=body_html,
+        intro=(body_html + extra),
         button_label="View photos",
         button_url=link,
         footer_note="If you did not expect this email, you can ignore it.",
@@ -936,7 +955,10 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         + f"This link will expire on: {expire_pretty}."
     )
 
-    sent = send_email_smtp(email, subject, html, text)
+    attachments = None
+    if qr_bytes:
+        attachments = [{"filename": "vault-qr.png", "content": qr_bytes, "mime_type": "image/png", "cid": "share_qr"}]
+    sent = send_email_smtp(email, subject, html, text, attachments=attachments)
     if not sent:
         logger.error("Failed to send share email")
         return JSONResponse({"error": "Failed to send email"}, status_code=500)
