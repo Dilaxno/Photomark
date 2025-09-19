@@ -597,7 +597,7 @@ def _render_modern_form_html(
                 }}
               }}
 
-              window.onSubmit = function(e) {{
+              window.onSubmit = async function(e) {{
                 // Validate: if custom is checked ensure coords present
                 if (customCb && customCb.checked) {{
                   if (!latField.value || !lngField.value) {{
@@ -606,7 +606,29 @@ def _render_modern_form_html(
                     return false;
                   }}
                 }}
-                return true;
+
+                // Submit via fetch to keep the form on the page and show a message
+                e.preventDefault();
+                const form = e.target;
+                const msgEl = document.getElementById('msg');
+                if (msgEl) msgEl.textContent = 'Sending...';
+                try {{
+                  const res = await fetch(form.action || '/api/booking/submit', {{
+                    method: 'POST',
+                    body: new FormData(form),
+                    credentials: 'same-origin'
+                  }});
+                  let data = null;
+                  try {{ data = await res.json(); }} catch(_err) {{ data = null; }}
+                  if (res.ok && data && data.ok) {{
+                    if (msgEl) msgEl.textContent = 'Thank you! Your request has been sent.';
+                  }} else {{
+                    if (msgEl) msgEl.textContent = 'Something went wrong. Please try again.';
+                  }}
+                }} catch (err) {{
+                  if (msgEl) msgEl.textContent = 'Network error. Please try again.';
+                }}
+                return false;
               }}
 
               function init() {{
