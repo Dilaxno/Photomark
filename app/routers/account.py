@@ -34,6 +34,17 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
     # Gather name/email from client or Firebase Auth (best-effort)
     name_client = str(((payload or {}).get("name") if payload else "") or "").strip()
     email_client = str(((payload or {}).get("email") if payload else "") or "").strip()
+    # Optional collaborator signup flag from client; only used to set default plan on first create,
+    # or to upgrade an existing 'free' doc to 'collaborator' immediately after signup.
+    collab_signup = False
+    try:
+        if payload:
+            flag = payload.get("collaborator_signup")
+            role = str(payload.get("role") or "").strip().lower()
+            plan_wanted = str(payload.get("plan") or "").strip().lower()
+            collab_signup = bool(flag) or role == "collaborator" or plan_wanted == "collaborator"
+    except Exception:
+        collab_signup = False
 
     name_auth = ""
     email_auth = ""
@@ -79,9 +90,20 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
                 "updatedAt": fb_fs.SERVER_TIMESTAMP,
             }
             if snap.exists:
-                txn.update(doc_ref, payload)
+                # Always update basic identity fields
+                update_payload = dict(payload)
+                # If this was explicitly a collaborator signup and current plan is 'free',
+                # promote to 'collaborator' (server-side only; Admin SDK bypasses client rules)
+                try:
+                    cur = snap.to_dict() or {}
+                    if collab_signup and str(cur.get("plan") or "free").lower() == "free":
+                        update_payload["plan"] = "collaborator"
+                except Exception:
+                    pass
+                txn.update(doc_ref, update_payload)
             else:
-                payload["plan"] = "free"  # default on create
+                # default on create; allow collaborator plan when explicitly requested
+                payload["plan"] = "collaborator" if collab_signup else "free"
                 payload["createdAt"] = fb_fs.SERVER_TIMESTAMP
                 txn.set(doc_ref, payload)
 

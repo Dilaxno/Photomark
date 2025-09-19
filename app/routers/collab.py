@@ -8,6 +8,7 @@ from datetime import datetime as _dt
 import numpy as np
 import cv2
 from PIL import Image
+import secrets
 
 from app.core.config import (
     logger,
@@ -17,9 +18,15 @@ from app.core.config import (
     COLLAB_RATE_LIMIT_MAX_ACTIONS,
     COLLAB_MAX_RECIPIENTS,
 )
-from app.core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid
+from app.core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid, get_fs_client as _get_fs_client
 from app.utils.emailing import render_email, send_email_smtp
 from app.utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
+
+# Firestore admin helpers (for server timestamps)
+try:
+    from firebase_admin import firestore as fb_fs  # type: ignore
+except Exception:
+    fb_fs = None  # type: ignore
 
 router = APIRouter(prefix="/api/collab", tags=["collab"]) 
 
@@ -864,11 +871,8 @@ async def retouch_send_back(
     except Exception as ex:
         logger.warning(f"collab: failed to write retouch meta for {return_key}: {ex}")
 
-    # Add to a special vault for visibility (optional)
-    try:
-        _add_to_vault(sender_uid, FRIENDS_VAULT_NAME, [return_key])
-    except Exception as ex:
-        logger.warning(f"collab: failed to add sent-back item to sender vault: {ex}")
+    # Do NOT add to a generic friends vault; these will be shown under a dedicated
+    # "Edited by Partner" section in the sender's gallery UI.
 
     # Notify original sender
     try:
@@ -887,3 +891,80 @@ async def retouch_send_back(
         logger.warning(f"Email notify failed (retouch send-back): {ex}")
 
     return {"ok": True, "key": return_key, "url": return_url}
+
+
+# ----------------------
+# Collaborator password management
+# ----------------------
+
+@router.post("/password/generate")
+async def generate_collaborator_password(request: Request):
+    """
+    Generate or rotate the collaborator password for the owner (current user).
+    Stores it under Firestore collection 'collaborators-passwords/{owner_uid}'.
+    Returns the plaintext password so it can be shared with collaborators.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    db = _get_fs_client()
+    if db is None or fb_fs is None:
+        _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
+    try:
+        pw = secrets.token_urlsafe(10)
+        doc_ref = db.collection('collaborators-passwords').document(uid)
+        doc_ref.set({
+            "owner_uid": uid,
+            "password": pw,
+            "updatedAt": fb_fs.SERVER_TIMESTAMP,
+            "createdAt": fb_fs.SERVER_TIMESTAMP,
+        }, merge=True)
+        return {"ok": True, "password": pw}
+    except Exception as ex:
+        logger.exception(f"generate_collaborator_password failed: {ex}")
+        _friendly_err("Failed to generate password", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@router.post("/password/verify")
+async def verify_collaborator_password(request: Request):
+    """
+    Verify a collaborator password and unlock tools for the current user if valid.
+    Body: { password: string }
+    Effect: sets users/{uid}.collab_unlocked = true when matched.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    try:
+        body = await request.json()
+    except Exception:
+        _friendly_err("Invalid JSON body")
+    pw = str((body or {}).get("password") or "").strip()
+    if not pw:
+        _friendly_err("Password required")
+
+    db = _get_fs_client()
+    if db is None or fb_fs is None:
+        _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    try:
+        # Query for a matching password (owner rotates stored value)
+        coll = db.collection('collaborators-passwords')
+        q = coll.where('password', '==', pw).limit(1)
+        matches = list(q.stream())  # type: ignore
+        if not matches:
+            _friendly_err("Invalid password", status.HTTP_400_BAD_REQUEST)
+        owner_uid = (matches[0].to_dict() or {}).get('owner_uid') or matches[0].id
+        # Set unlock flag on the collaborator's profile
+        user_ref = db.collection('users').document(uid)
+        user_ref.set({
+            'collab_unlocked': True,
+            'unlockedOwner': owner_uid,
+            'updatedAt': fb_fs.SERVER_TIMESTAMP,
+        }, merge=True)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        logger.exception(f"verify_collaborator_password failed: {ex}")
+        _friendly_err("Verification failed", status.HTTP_500_INTERNAL_SERVER_ERROR)
