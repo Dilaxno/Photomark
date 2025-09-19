@@ -87,7 +87,14 @@ try:
     app.include_router(portfolio.router)
 except Exception as _ex:
     logger.warning(f"portfolio router not available: {_ex}")
-# style LUT GPU endpoint
+# style LUT endpoints (CreateLUT dedicated + legacy)
+try:
+    from app.routers import create_lut  # noqa: E402
+    app.include_router(create_lut.router)
+except Exception as _ex:
+    logger.warning(f"create_lut router not available: {_ex}")
+
+# legacy style LUT GPU endpoint
 try:
     from app.routers import style_lut  # noqa: E402
     app.include_router(style_lut.router)
