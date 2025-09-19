@@ -2,6 +2,9 @@ from fastapi import APIRouter, UploadFile, File, Form, Request
 from starlette.responses import StreamingResponse
 from typing import Optional, Tuple, List, Dict, Any
 import io
+import os
+import asyncio
+import json
 
 import numpy as np
 from PIL import Image
@@ -16,6 +19,12 @@ except Exception:
         from pylut.lut import LUT3D  # type: ignore
     except Exception:
         LUT3D = None  # handled at runtime
+
+# Optional: HTTP client for outbound calls (Groq)
+try:
+    import httpx  # type: ignore
+except Exception:
+    httpx = None  # type: ignore
 
 from app.core.auth import resolve_workspace_uid, has_role_access
 from app.core.config import logger
@@ -382,3 +391,78 @@ async def lut_preview(
     except Exception as ex:
         logger.exception(f"LUT preview failed: {ex}")
         return {"error": str(ex)}
+
+
+@router.post('/ai-suggest')
+async def lut_ai_suggest(request: Request, payload: Dict[str, Any]):
+    """
+    Use server-side Groq API key to generate LUT parameters from a natural-language description.
+    Body: { description: string }
+    Response: { content: string }  # raw model JSON as a string
+    """
+    try:
+        desc = str((payload or {}).get('description') or '').strip()
+        if not desc:
+            return {"error": "missing_description", "message": "Provide 'description' string."}
+
+        key = (os.getenv('GROQ_API_KEY') or os.getenv('GROQ_API_TOKEN') or '').strip()
+        if not key:
+            return {"error": "missing_groq_key", "message": "Server not configured with GROQ_API_KEY"}
+
+        system_prompt = (
+            "You are a professional colorist and LUT generator. Your task is to translate a text description into precise LUT parameters using the following ranges: "
+            "Resolution: 173365 "
+            "Primaries: - Exposure (EV): -3.00 to 3.00 - Lift (Shadows): -0.300 to 0.300 - Gamma (Midtones): 0.20x to 3.00x - Gain (Highlights): 0.500x to 1.500x - Offset: -0.500 to 0.500 "
+            "Contrast & Pivot: - Contrast: 0.00x to 2.00x - Contrast Pivot: 0.00 to 1.00 - Apply Cinematic S-Curve: true/false "
+            "RGB Curves: - Master: S-shape - Red, Green, Blue: adjust shadows, midtones, highlights individually "
+            "Saturation Controls: - Global Saturation: 0.00 to 2.00 - Sat vs Luma: Shadows, Midtones, Highlights "
+            "Hue Shifts & Hue vs Sat: - Hue→Hue: Reds, Greens, Blues - Hue→Sat: Oranges, Greens, Magentas "
+            "White Balance Bias: - Shadows: Cool/Warm - Highlights: Cool/Warm "
+            "Optional Tri-band tints: - Shadows, Midtones, Highlights (hex) "
+            "Tone Mapping / Gamma Curve: - Lift Shadows: true/false - Rolloff Highlights: true/false - Mid Gamma: 0.20 to 3.00 "
+            "Color Wheels (optional): - Shadows: Hue, Sat - Midtones: Hue, Sat - Highlights: Hue, Sat "
+            "Instructions: 1. Output a JSON object with all parameters. 2. When the user provides a text description of the desired look (e.g., \"warm cinematic wedding highlight look with teal shadows and orange highlights\"), generate numeric values within the above ranges. 3. Include all sections: Primaries, Contrast & Pivot, RGB Curves, Saturation Controls, Hue Shifts & Hue vs Sat, White Balance, Tone Mapping, Color Wheels. 4. Do not include text explanations, only JSON."
+        )
+
+        url = 'https://api.groq.com/openai/v1/chat/completions'
+        headers = {
+            'Authorization': f'Bearer {key}',
+            'Content-Type': 'application/json',
+        }
+        req_payload = {
+            'model': 'llama-3.1-8b-instant',
+            'temperature': 0.2,
+            'max_tokens': 800,
+            'messages': [
+                { 'role': 'system', 'content': system_prompt },
+                { 'role': 'user',   'content': desc },
+            ],
+        }
+
+        raw_text: str
+        if httpx is not None:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, headers=headers, json=req_payload)
+                resp.raise_for_status()
+                raw_text = resp.text
+        else:
+            import urllib.request
+            import urllib.error
+            def _do_req() -> str:
+                req = urllib.request.Request(url, data=json.dumps(req_payload).encode('utf-8'), headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310
+                    return r.read().decode('utf-8', errors='ignore')
+            loop = asyncio.get_event_loop()
+            raw_text = await loop.run_in_executor(None, _do_req)
+
+        data = json.loads(raw_text)
+        content = str((((data.get('choices') or [{}])[0].get('message') or {}).get('content')) or '').strip()
+        if not content:
+            return {"error": "empty_response", "raw": data}
+        return {"content": content}
+    except Exception as ex:
+        try:
+            logger.exception(f"LUT ai-suggest failed: {ex}")
+        except Exception:
+            pass
+        return {"error": "request_failed", "message": str(ex)}
