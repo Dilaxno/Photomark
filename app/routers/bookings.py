@@ -1027,12 +1027,17 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
         return {"error": "not_found"}
 
     new_status = str(payload.get("status") or "").lower()
+    # Optional cancellation reason provided by the photographer when cancelling
+    cancel_reason = str(payload.get("cancel_reason") or payload.get("reason") or payload.get("comment") or "").strip()
     if new_status not in ("new","pending","confirmed","cancelled"):
         return {"error": "bad_status"}
 
     now = int(time.time())
     rec["status"] = new_status
     rec["updated_at"] = now
+    # Persist cancellation reason on the record if provided
+    if new_status == "cancelled" and cancel_reason:
+        rec["cancel_reason"] = cancel_reason
     write_json_key(rec_key, rec)
 
     # Firestore update (best-effort)
@@ -1042,6 +1047,7 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
             db.collection('users').document(eff_uid).collection('bookings').document(booking_id).set({
                 "status": new_status,
                 "updated_at": now,
+                **({"cancel_reason": cancel_reason} if (new_status == "cancelled" and cancel_reason) else {}),
             }, merge=True)
     except Exception as ex:
         logger.warning(f"booking status: firestore update failed for {eff_uid}/{booking_id}: {ex}")
@@ -1091,6 +1097,18 @@ async def update_status(request: Request, booking_id: str, payload: Dict[str, An
                         f"We’re sorry to let you know your booking with <b>{account_name}</b> was <b>cancelled</b>.<br>"
                         f"If this was a mistake or you’d like to reschedule, contact us at <a href='mailto:{owner_email or 'support@photomark.app'}'>{owner_email or 'support@photomark.app'}</a>."
                     )
+                    # Append photographer's cancellation reason if provided
+                    try:
+                        reason = (cancel_reason or str(rec.get('cancel_reason') or '')).strip()
+                    except Exception:
+                        reason = cancel_reason
+                    if reason:
+                        def esc(s: str) -> str:
+                            try:
+                                return str(s).replace('<', '&lt;').replace('>', '&gt;')
+                            except Exception:
+                                return str(s)
+                        intro += f"<br><br><strong>Reason:</strong> {esc(reason)}"
 
                 html = render_email(
                     "email_basic.html",
